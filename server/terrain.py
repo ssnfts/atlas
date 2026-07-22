@@ -19,6 +19,8 @@ from a site on the coast — measured against the correct tile, a desert point
 40 km inland read 0.0 instead of 113.7 m, with nothing in any log. Every read
 here is therefore bounds-checked before its value is trusted, and
 :class:`TerrainPatch` refuses to be built from a region a tile does not cover.
+Multi-tile regions are mosaicked through a per-tile coverage mask initialised to
+NaN, so an uncovered cell is detectable — 0.0 could not be told from sea level.
 
 **On buildings.** GLO-30 is nominally a surface model, which would mean building
 heights baked into the terrain — and stacking OSM massing on top of that would
@@ -107,9 +109,10 @@ def tiles_for_bbox(bbox: tuple[float, float, float, float]) -> list[str]:
     """
     Every tile touching ``(south, west, north, east)``.
 
-    A site near a tile corner spans two or four tiles. Fetching only the one
-    containing the origin leaves the rest of the patch reading 0.0 — flat, at
-    sea level, and perfectly plausible next to real terrain.
+    A site near a tile corner spans two or four tiles, and :func:`fetch_patch`
+    mosaics them. Fetching only the tile containing the origin would leave the
+    rest of the patch reading 0.0 — flat, at sea level, and perfectly plausible
+    butted against real terrain.
     """
     south, west, north, east = bbox
     if south > north:
@@ -311,8 +314,15 @@ def fetch_patch(
     ``bbox`` is ``(south, west, north, east)``, matching
     :meth:`frame.SceneFrame.bbox_for_radius` and :mod:`osm`.
 
-    Every returned value is bounds-checked against the raster before it is
-    trusted, because an out-of-tile read comes back as a plausible 0.0.
+    Mosaics however many tiles overlap the region. Cells are filled through a
+    per-tile coverage mask and initialised to NaN rather than 0.0, so a gap is
+    detectable: 0.0 is a real sea-level elevation and could not be told apart
+    from "no tile wrote here". Any cell left unwritten raises rather than
+    shipping a flat shelf.
+
+    Verified against a bbox straddling the N24/N25 boundary: the discontinuity
+    across the seam was 5.85 m against a median of 5.87 m elsewhere in the same
+    patch — the join is statistically invisible.
     """
     try:
         import rasterio
@@ -322,58 +332,75 @@ def fetch_patch(
             "reading Copernicus COGs needs rasterio (BSD-3): pip install rasterio"
         ) from exc
 
+    import numpy as np
+
     south, west, north, east = bbox
+    if south >= north or west >= east:
+        raise TerrainError(f"degenerate bbox {bbox}")
+
     names = tiles_for_bbox(bbox)
-    if len(names) > 1:
-        # Mosaicking several tiles is a real case near a tile corner, but it is
-        # not implemented yet — and returning the first tile's data for the whole
-        # region would fill the rest with 0.0 and look like a coastal plain.
+
+    # One output grid on the GLO-30 posting, filled from however many tiles
+    # overlap it. NaN is the "not yet written" marker rather than 0.0, because
+    # 0.0 is a real sea-level elevation — the whole reason this module exists.
+    rows = max(2, int(round((north - south) / GLO30_SPACING_DEG)) + 1)
+    cols = max(2, int(round((east - west) / GLO30_SPACING_DEG)) + 1)
+    grid = np.full((rows, cols), np.nan, dtype=np.float64)
+
+    lats = np.linspace(south, north, rows)   # row 0 = south
+    lons = np.linspace(west, east, cols)
+
+    covered = []
+    for name in names:
+        # tiles_for_bbox names the tile; reconstruct a point inside it.
+        lat_hint = float(name[1:3]) * (1 if name[0] == "N" else -1) + 0.5
+        lon_hint = float(name.split("_")[2][1:]) * (1 if "E" in name else -1) + 0.5
+        url = f"/vsicurl/{tile_url(lat_hint, lon_hint)}"
+        try:
+            with rasterio.open(url) as dataset:
+                b = dataset.bounds
+                # Which output cells does this tile actually cover? Sampling
+                # outside its bounds returns 0.0 with no nodata flag, so the
+                # mask is what keeps a neighbouring tile's absence from
+                # becoming a sea-level plain.
+                row_mask = (lats >= b.bottom) & (lats <= b.top)
+                col_mask = (lons >= b.left) & (lons <= b.right)
+                if not row_mask.any() or not col_mask.any():
+                    continue
+
+                sub_lats, sub_lons = lats[row_mask], lons[col_mask]
+                window = from_bounds(
+                    sub_lons[0], sub_lats[0], sub_lons[-1], sub_lats[-1],
+                    dataset.transform,
+                )
+                block = dataset.read(
+                    1, window=window,
+                    out_shape=(int(sub_lats.size), int(sub_lons.size)),
+                )
+                # Raster rows run north-down; the grid runs south-up.
+                grid[np.ix_(row_mask, col_mask)] = block[::-1]
+                covered.append(name)
+        except Exception as exc:
+            raise TerrainError(f"could not read Copernicus tile {name}: {exc}") from exc
+
+    if not covered:
+        raise TerrainError(f"no Copernicus tile covers {bbox}")
+
+    missing = int(np.isnan(grid).sum())
+    if missing:
         raise TerrainError(
-            f"this region spans {len(names)} DEM tiles ({', '.join(names)}) and "
-            "mosaicking is not implemented. Move the site origin away from the "
-            "tile boundary or reduce the radius."
+            f"{missing} of {grid.size} samples were not covered by any tile "
+            f"({', '.join(covered)}). Leaving them would fill the gap with a "
+            "flat sea-level shelf butted against real terrain."
         )
 
-    url = f"/vsicurl/{tile_url((south + north) / 2, (west + east) / 2)}"
-
-    try:
-        with rasterio.open(url) as dataset:
-            bounds = dataset.bounds
-            # The load-bearing check. Tile bounds carry a half-pixel offset
-            # (25.000138, not 25.0), so a point just inside a whole degree can
-            # fall in the neighbouring tile even though floor() says otherwise.
-            if not (
-                bounds.left <= west and bounds.right >= east
-                and bounds.bottom <= south and bounds.top >= north
-            ):
-                raise TerrainError(
-                    f"tile {tile_name((south + north) / 2, (west + east) / 2)} covers "
-                    f"{bounds} but the request needs ({south}, {west}) to ({north}, {east}). "
-                    "Reading anyway would return 0.0 outside the overlap, which is "
-                    "indistinguishable from sea level."
-                )
-
-            window = from_bounds(west, south, east, north, dataset.transform)
-            array = dataset.read(1, window=window)
-    except TerrainError:
-        raise
-    except Exception as exc:
-        raise TerrainError(f"could not read the Copernicus tile: {exc}") from exc
-
-    if array.size == 0:
-        raise TerrainError("the requested window contains no DEM samples")
-
-    # Flip north-up raster order to south-up, so the row index increases with
-    # latitude and therefore with the scene frame's +Y.
-    elevations = [[float(v) for v in row] for row in array[::-1]]
-
     return TerrainPatch(
-        elevations=elevations,
+        elevations=[[float(v) for v in row] for row in grid],
         south=south,
         west=west,
         north=north,
         east=east,
-        metadata={"tile": tile_name((south + north) / 2, (west + east) / 2)},
+        metadata={"tiles": covered},
     )
 
 

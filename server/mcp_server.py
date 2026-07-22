@@ -218,7 +218,7 @@ def atlas_fetch_context(
     if include_terrain:
         patch = terrain.fetch_for_site(frame, terrain_radius_m)
         result["terrain"] = {
-            "tile": patch.metadata.get("tile"),
+            "tiles": patch.metadata.get("tiles"),
             "grid": f"{patch.rows}x{patch.cols}",
             "min_m": round(patch.min_elevation(), 2),
             "max_m": round(patch.max_elevation(), 2),
