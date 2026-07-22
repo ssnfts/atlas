@@ -8,6 +8,13 @@ requests>=2.32
 pyproj>=3.6
 shapely>=2.0
 
+# Copernicus DEM tiles are Cloud Optimized GeoTIFFs. rasterio (BSD-3, so
+# commercially clean like the rest of the stack) reads them over HTTP with range
+# requests, so a 1 km site pulls tens of kilobytes rather than the whole 22 MB
+# tile. Hand-parsing a tiled, compressed, float32 GeoTIFF is the kind of thing
+# that produces plausible wrong elevations rather than errors.
+rasterio>=1.4
+
 # MCP server
 fastmcp>=2.0
 
