@@ -15,6 +15,11 @@ shapely>=2.0
 # that produces plausible wrong elevations rather than errors.
 rasterio>=1.4
 
+# Photogrammetry ingest: EXIF (focal length, GPS) and pixel access for blur
+# detection, which is what lets a bad capture be rejected in seconds rather
+# than after an hour of GPU time. HPND licence, permissive.
+pillow>=10.0
+
 # MCP server
 fastmcp>=2.0
 

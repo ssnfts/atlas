@@ -31,14 +31,15 @@ The lighting pipeline works end to end and is verified against rendered output.
 | Solar position | working — agrees with pvlib's NREL SPA to 0.004° |
 | Timezone / DST | working — rejects nonexistent times rather than shifting them |
 | Scene frame | working — verified against WGS84 geodesics to 0.1% |
-| 3ds Max bridge | working — main-thread marshalled, 598 offline tests |
+| 3ds Max bridge | working — main-thread marshalled, 828 offline tests |
 | V-Ray sun + sky | working — parameters discovered from the live host |
 | Weather → sky | working — turbidity from aerosol optical depth |
 | OSM building massing | working — verified in the live host, sits on terrain |
 | Terrain (Copernicus DEM) | working — GLO-30, single tile; mosaicking not implemented |
 | Attribution manifest | working — generated from the sources a build used |
-| Photogrammetry (Meshroom) | not started |
-| MCP server | not started |
+| MCP server | working — 10 tools, driven end to end |
+| Materials | working — tag-driven, shared per material kind |
+| Photogrammetry (Meshroom) | ingest + capture validation only; reconstruction needs footage |
 
 ### The acceptance test
 
@@ -125,9 +126,31 @@ terms must be furthest along +Y in Max.
 | Skipped | 0 |
 | Verified in host | 93 — scale, orientation and index integrity |
 
+## Driving it from a model
+
+The MCP server exposes ten tools over the modules above:
+
+```bash
+.venv\Scripts\python.exe server\mcp_server.py
+```
+
+`atlas_solar_position` needs neither 3ds Max nor the network, so it is the one
+to reach for when the question is "where was the sun". `atlas_fetch_context`
+reports what OSM and Copernicus have for a site — including how many building
+heights are real rather than guessed — without building anything.
+`atlas_build_scene` is the headline call.
+
+Two conventions the tools follow. Failures are **returned** as
+`{"success": false, "error": ..., "error_type": ...}` rather than raised, since
+an exception reaches the model as an opaque protocol error it cannot act on;
+`error_type` separates "3ds Max is closed" from "Overpass is busy", because the
+next move differs. And nothing is advertised that does not exist —
+`atlas_reconstruct` is absent rather than stubbed, because a model will plan
+around a promised tool and fail late.
+
 ## Tests
 
-598 tests, no 3ds Max and no network required:
+828 tests, no 3ds Max and no network required:
 
 ```bash
 .venv\Scripts\python.exe -m pytest tests/ -q
@@ -167,6 +190,9 @@ server/
   massing.py     footprints → watertight extruded meshes
   terrain.py     Copernicus GLO-30 elevation → terrain mesh
   attribution.py per-build ATTRIBUTION.txt and height provenance
+  materials.py   OSM tags → shared VRayMtl definitions
+  recon.py       photogrammetry ingest, EXIF/GPS and capture validation
+  mcp_server.py  FastMCP tool surface over the above
   scene.py       V-Ray sun, sky, camera and exposure
   maxbridge.py   client for the bridge
 bridge/
@@ -206,6 +232,13 @@ tests/
   query succeeds and returns nothing, which is indistinguishable from an
   unmapped site. Use `osm.query_for_site()`, which builds the tuple from the
   frame so no caller writes the ordering by hand.
+- **`setattr` on a pymxs material accepts any name at all.** A material's
+  colour parameters are not in `getPropNames`, so they are reached with
+  `setattr` — and `setattr` on a wrapper creates an ordinary Python attribute
+  for any string, which `getattr` then reads straight back. A probe with
+  `bogus_param_xyz` reported itself applied while V-Ray used the default. The
+  bridge now checks `hasattr` first and returns a `rejected` map; an empty one
+  is what makes `applied` mean anything.
 - **A Copernicus DEM read outside its tile returns `0.0`, not an error.** The
   dataset declares no nodata value and 0.0 is a real sea-level elevation, so
   loading the wrong tile is indistinguishable from a site on the coast —

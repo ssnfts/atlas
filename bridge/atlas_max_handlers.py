@@ -390,8 +390,15 @@ def cmd_assign_material(params: dict) -> dict:
 
     Note that a material's colour parameters (``diffuse``, ``reflection``) do
     **not** appear in ``getPropNames``, which lists only the scripted-plugin
-    parameter block. They are plain attributes, so they are set with setattr and
-    validated by reading back rather than by a name check.
+    parameter block. They are plain attributes reached with setattr.
+
+    **Reading back after setattr does not validate them.** setattr on a pymxs
+    wrapper creates an ordinary Python attribute for any name at all, and
+    getattr then returns it, so an invented parameter reported itself as
+    applied while V-Ray quietly used the default — measured: a probe with
+    ``bogus_param_xyz`` came back OK. Existence is therefore checked with
+    hasattr *before* assigning, which is the one thing that distinguishes a
+    real V-Ray attribute from a typo.
     """
     nodes = params.get("nodes") or ([params["node"]] if params.get("node") else [])
     if not nodes:
@@ -406,13 +413,25 @@ def cmd_assign_material(params: dict) -> dict:
     if params.get("name"):
         mtl.name = str(params["name"])
 
+    # Names the scripted parameter block does declare. Colour attributes are not
+    # among them, hence the hasattr check below rather than only this set.
+    block_params = {str(n).lower() for n in rt.getPropNames(mtl)}
+
     applied = {}
+    rejected = {}
     for key, value in (params.get("params") or {}).items():
+        name = str(key)
+        if not hasattr(mtl, name) and name.lower() not in block_params:
+            rejected[name] = (
+                f"{rt.classOf(mtl)} has no attribute {name!r}. Discover the real "
+                "name from the live material rather than recalling it."
+            )
+            continue
         try:
-            setattr(mtl, str(key), to_mxs(value))
-            applied[str(key)] = coerce(getattr(mtl, str(key)))
+            setattr(mtl, name, to_mxs(value))
+            applied[name] = coerce(getattr(mtl, name))
         except Exception as exc:
-            applied[str(key)] = f"<failed: {type(exc).__name__}: {exc}>"
+            rejected[name] = f"{type(exc).__name__}: {exc}"
 
     assigned = []
     for node_name in nodes:
@@ -427,6 +446,7 @@ def cmd_assign_material(params: dict) -> dict:
         "material_name": str(mtl.name),
         "assigned_to": assigned,
         "applied": applied,
+        "rejected": rejected,
     }
 
 

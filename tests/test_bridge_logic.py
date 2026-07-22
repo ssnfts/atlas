@@ -80,6 +80,30 @@ class _FakeMesh(_FakeNode):
         )
 
 
+class _FakeMaterial:
+    """
+    Stands in for a VRayMtl.
+
+    Models the property that makes the real one dangerous: setattr on a pymxs
+    wrapper succeeds for *any* name and getattr reads it straight back, so a
+    read-back cannot tell a real V-Ray attribute from a typo. Only the
+    attributes declared here exist before assignment.
+    """
+
+    # Colour attributes, which the scripted parameter block does not declare.
+    _REAL = ("diffuse", "reflection", "refraction", "reflection_glossiness",
+             "reflection_ior", "reflection_metalness")
+    # What getPropNames would return: the parameter block, no colours.
+    _BLOCK = ("brdf_type", "texmap_bump", "texmap_bump_multiplier")
+
+    def __init__(self):
+        self.name = "VRayMtl"
+        for attr in self._REAL:
+            object.__setattr__(self, attr, None)
+        for attr in self._BLOCK:
+            object.__setattr__(self, attr, 0)
+
+
 class _FakeRuntime:
     def __init__(self):
         self.undefined = _FakeSentinel("undefined")
@@ -147,6 +171,14 @@ class _FakeRuntime:
 
     def Color(self, r, g, b):
         return (r, g, b)
+
+    # -- materials --
+    def VRayMtl(self):
+        return _FakeMaterial()
+
+    def getPropNames(self, obj):
+        """Only the scripted parameter block, exactly as MaxScript reports it."""
+        return list(getattr(obj, "_BLOCK", ()))
 
     @property
     def units(self):
@@ -574,6 +606,82 @@ def test_batch_of_meshes_survives_one_bad_building(fresh_runtime):
     )
     assert [s["ok"] for s in out["steps"]] == [True, False, True]
     assert all(fresh_runtime.getNodeByName(n) for n in ("good_a", "good_b"))
+
+
+# ── Materials ─────────────────────────────────────────────────────────────────
+#
+# A material's colour attributes are not in getPropNames, so they are reached
+# with setattr. That is what made the old read-back check hollow: setattr on a
+# pymxs wrapper accepts *any* name and getattr returns it, so an invented
+# parameter reported itself as applied while V-Ray used the default. Measured
+# against the live host, `bogus_param_xyz` came back OK.
+
+def _assign(fresh_runtime, params, node="Cube"):
+    fresh_runtime._nodes[node] = _FakeNode(node, 1)
+    return handlers.dispatch(
+        "assign_material", {"nodes": [node], "params": params, "name": "M"}
+    )
+
+
+def test_real_colour_attributes_are_applied(fresh_runtime):
+    out = _assign(fresh_runtime, {"diffuse": {"__color__": [1, 2, 3]},
+                                  "reflection_glossiness": 0.75})
+    assert set(out["applied"]) == {"diffuse", "reflection_glossiness"}
+    assert out["rejected"] == {}
+
+
+def test_an_invented_parameter_is_rejected_not_silently_applied(fresh_runtime):
+    """
+    The regression. Before the hasattr check this returned applied=OK and the
+    render used V-Ray's default, with nothing anywhere to explain it.
+    """
+    out = _assign(fresh_runtime, {"bogus_param_xyz": 1.0})
+    assert "bogus_param_xyz" not in out["applied"]
+    assert "bogus_param_xyz" in out["rejected"]
+    assert "no attribute" in out["rejected"]["bogus_param_xyz"]
+
+
+def test_a_realistic_typo_is_rejected(fresh_runtime):
+    """`reflection_glosiness` — one missing letter — is the case that matters."""
+    out = _assign(fresh_runtime, {"reflection_glosiness": 0.5})
+    assert out["applied"] == {}
+    assert "reflection_glosiness" in out["rejected"]
+
+
+def test_parameter_block_names_are_still_accepted(fresh_runtime):
+    """getPropNames entries are valid too, even though they are not attributes."""
+    out = _assign(fresh_runtime, {"brdf_type": 4})
+    assert "brdf_type" in out["applied"]
+
+
+def test_good_parameters_survive_alongside_a_bad_one(fresh_runtime):
+    """One typo must not cost the whole material."""
+    out = _assign(fresh_runtime, {"diffuse": {"__color__": [1, 1, 1]}, "nope": 2})
+    assert "diffuse" in out["applied"]
+    assert "nope" in out["rejected"]
+
+
+def test_material_is_assigned_to_every_named_node(fresh_runtime):
+    for name in ("A", "B", "C"):
+        fresh_runtime._nodes[name] = _FakeNode(name, 1)
+    out = handlers.dispatch(
+        "assign_material", {"nodes": ["A", "B", "C"], "params": {}, "name": "Shared"}
+    )
+    assert out["assigned_to"] == ["A", "B", "C"]
+    assert out["material_name"] == "Shared"
+
+
+def test_assign_material_needs_a_node(fresh_runtime):
+    with pytest.raises(ValueError, match="node"):
+        handlers.dispatch("assign_material", {"params": {}})
+
+
+def test_unknown_material_class_is_rejected(fresh_runtime):
+    with pytest.raises(ValueError, match="unknown material class"):
+        handlers.dispatch(
+            "assign_material",
+            {"nodes": ["A"], "material_class": "NotAMaterial", "params": {}},
+        )
 
 
 # ── Job object ────────────────────────────────────────────────────────────────
