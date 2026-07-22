@@ -111,14 +111,6 @@ class Mesh:
             )
         return total / 6.0
 
-    def as_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "vertex_count": self.vertex_count,
-            "face_count": self.face_count,
-            **self.metadata,
-        }
-
 
 # ── Ring geometry ─────────────────────────────────────────────────────────────
 
@@ -696,7 +688,6 @@ def building_to_mesh(building: Building, frame: SceneFrame, ground=None) -> Mesh
             "osm_id": building.osm_id,
             "osm_type": building.osm_type,
             "height_source": building.height_source,
-            "material_tag": building.material,
             "ground_m": round(base_elevation, 3),
         }
     )

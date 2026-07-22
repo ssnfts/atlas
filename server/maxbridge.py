@@ -299,16 +299,11 @@ class MaxBridge:
             results += self.batch(steps, stop_on_error=stop_on_error, timeout=timeout)
         return results
 
-    def list_renderers(self, timeout: float = 60.0) -> dict:
-        """Installed renderer classes, and which one each slot currently holds."""
-        return self._send({"command": "list_renderers"}, timeout=timeout)
-
     def set_renderer(
         self,
         renderer: str,
         *,
         also_activeshade: bool = True,
-        also_medit: bool = False,
         timeout: float = 120.0,
     ) -> dict:
         """
@@ -322,7 +317,6 @@ class MaxBridge:
                 "command": "set_renderer",
                 "renderer": renderer,
                 "also_activeshade": also_activeshade,
-                "also_medit": also_medit,
             },
             timeout=timeout,
         )

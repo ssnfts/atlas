@@ -20,7 +20,6 @@ from frame import SceneFrame  # noqa: E402
 from osm import (  # noqa: E402
     DEFAULT_HEIGHT_M,
     METRES_PER_LEVEL,
-    Building,
     assemble_rings,
     build_query,
     parse_overpass,
@@ -581,14 +580,3 @@ def test_no_retry_when_disabled(monkeypatch, no_sleep):
     assert len(attempts) == 1
 
 
-def test_is_part_distinguishes_a_piece_from_a_whole_building():
-    """
-    A detailed tower is an outline tagged `building` plus stacked
-    `building:part` volumes. Rendering both gives coincident, z-fighting faces.
-    """
-    part = Building(1, "way", OUTER, tags={"building:part": "yes"})
-    whole = Building(2, "way", OUTER, tags={"building": "yes"})
-    both = Building(3, "way", OUTER, tags={"building": "yes", "building:part": "yes"})
-    assert part.is_part
-    assert not whole.is_part
-    assert not both.is_part

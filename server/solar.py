@@ -117,11 +117,6 @@ class SolarPosition:
         """True when the apparent centre of the sun is above the horizon."""
         return self.altitude > 0.0
 
-    @property
-    def is_civil_twilight_or_lighter(self) -> bool:
-        """Civil twilight begins at -6 degrees; below that a sun light is meaningless."""
-        return self.altitude > -6.0
-
     def as_dict(self) -> dict:
         return {
             "azimuth": round(self.azimuth, 4),

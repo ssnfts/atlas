@@ -84,7 +84,15 @@ class SceneFrame:
         )
 
     def to_geodetic(self, x: float, y: float, z: float = 0.0) -> tuple[float, float, float]:
-        """Scene metres -> geodetic. Inverse of :meth:`to_scene`."""
+        """
+        Scene metres -> geodetic. Inverse of :meth:`to_scene`.
+
+        No production caller, and it stays anyway: it is what makes the forward
+        projection *provable*. ``test_round_trip_is_lossless`` composes the two
+        and asserts the identity across three latitudes, which is the only check
+        that would catch a metres-per-degree coefficient that is subtly wrong in
+        a self-consistent way. Deleting it as unused would delete the evidence.
+        """
         return (
             self.origin_lat + y / self._meters_per_deg_lat,
             self.origin_lon + x / self._meters_per_deg_lon,
@@ -108,12 +116,3 @@ class SceneFrame:
             self.origin_lat + dlat,
             self.origin_lon + dlon,
         )
-
-    def as_dict(self) -> dict:
-        return {
-            "origin_lat": self.origin_lat,
-            "origin_lon": self.origin_lon,
-            "origin_alt": self.origin_alt,
-            "axes": "+X=east, +Y=true north, +Z=up",
-            "units": "meters",
-        }

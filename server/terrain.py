@@ -61,11 +61,10 @@ ATTRIBUTION = (
     "provided under COPERNICUS by the European Union and ESA; all rights reserved"
 )
 
-ATTRIBUTION_MODIFIED = (
-    "produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus "
-    "Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European "
-    "Union and ESA; all rights reserved"
-)
+# The wording for *modified* elevation data lives in attribution.py, which owns
+# the manifest and decides which variant a build needs. Keeping a second copy
+# here invited the two drifting apart, on a string whose exact characters are a
+# licence condition.
 
 # 1 arc-second, the GLO-30 posting. Tiles are 3600x3600 over 1 degree.
 GLO30_SPACING_DEG = 1.0 / 3600.0

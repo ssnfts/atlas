@@ -4,9 +4,7 @@
 # produces a plausible-looking but completely wrong sun angle.
 tzdata>=2024.1
 timezonefinder>=6.5
-requests>=2.32
-pyproj>=3.6
-shapely>=2.0
+shapely>=2.0  # test-only: cross-validation reference for massing
 
 # Copernicus DEM tiles are Cloud Optimized GeoTIFFs. rasterio (BSD-3, so
 # commercially clean like the rest of the stack) reads them over HTTP with range

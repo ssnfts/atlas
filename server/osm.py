@@ -104,30 +104,6 @@ class Building:
         """``building:material`` — a hint for tag-driven material assignment."""
         return self.tags.get("building:material")
 
-    @property
-    def is_part(self) -> bool:
-        """
-        True for a ``building:part``, which is a *piece* of a building.
-
-        A tower mapped in detail has an outline tagged ``building`` plus several
-        ``building:part`` volumes stacked inside it. Rendering both gives
-        coincident faces and z-fighting, so the two sets are kept separable.
-        """
-        return "building:part" in self.tags and "building" not in self.tags
-
-    def as_dict(self) -> dict:
-        return {
-            "osm_id": self.osm_id,
-            "osm_type": self.osm_type,
-            "name": self.name,
-            "height_m": self.height_m,
-            "min_height_m": self.min_height_m,
-            "height_source": self.height_source,
-            "outer_vertices": len(self.outer),
-            "holes": len(self.inners),
-            "tags": self.tags,
-        }
-
 
 # ── Query ─────────────────────────────────────────────────────────────────────
 

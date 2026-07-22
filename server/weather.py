@@ -293,13 +293,6 @@ class SkySettings:
     rationale: dict = field(default_factory=dict)
     observation: Observation | None = None
 
-    def as_dict(self) -> dict:
-        return {
-            "params": self.params,
-            "rationale": self.rationale,
-            "observation": self.observation.as_dict() if self.observation else None,
-        }
-
 
 # WMO codes that imply the air itself is obscured, regardless of aerosol load.
 _FOG_CODES = {45, 48}
