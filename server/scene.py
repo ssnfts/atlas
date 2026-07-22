@@ -248,14 +248,28 @@ def build_camera(
     bridge.node_set(camera_name, "pos", MaxBridge.point3(*position))
     bridge.node_set(camera_name, "specify_fov", True)
     bridge.node_set(camera_name, "fov", float(fov_degrees))
-    # A targeted camera with no target node is in an undefined orientation;
-    # untargeted means the transform alone defines where it looks.
+
+    # A camera created from script has identity rotation and looks straight
+    # down its local -Z, exactly like a VRaySun with no target. Setting only the
+    # position and target_distance leaves it pointing at the ground no matter
+    # what `target` says, and nothing errors.
+    #
+    # This went unnoticed for a while because the only camera in the project was
+    # demo_shadow_test's, which looks straight down at a ground plane — the one
+    # view where the broken orientation is also the correct one.
+    #
+    # Fixed the same way build_sun fixes the sun: give it a real target node and
+    # let Max derive the rotation, then verify the direction rather than trust it.
+    target_name = f"{camera_name}_Target"
+    if bridge.call("getNodeByName", target_name) is None:
+        created_target = bridge.call("Targetobject")
+        bridge.node_set(created_target["__node__"], "name", target_name)
+    bridge.node_set(target_name, "pos", MaxBridge.point3(*target))
     try:
-        bridge.node_set(camera_name, "targeted", False)
+        bridge.node_set(camera_name, "targeted", True)
     except Exception:
         pass
-
-    import math
+    bridge.node_set(camera_name, "target", MaxBridge.node(target_name))
 
     dx, dy, dz = (t - p for t, p in zip(target, position))
     distance = math.sqrt(dx * dx + dy * dy + dz * dz)
@@ -263,6 +277,25 @@ def build_camera(
 
     applied = {"position": list(position), "fov": fov_degrees,
                "target_distance": round(distance, 3)}
+
+    # Verify the *direction*, not the position. A targeted camera looks along
+    # its local -Z, so the transform's Z axis must point from the target back
+    # toward the camera.
+    if distance > 1e-6:
+        back = tuple(-c / distance for c in (dx, dy, dz))
+        try:
+            z_axis = _transform_z_axis(bridge.node_get(camera_name, "transform"))
+            if z_axis is not None:
+                dot = sum(a * b for a, b in zip(z_axis, back))
+                if dot < 0.999:
+                    offset = math.degrees(math.acos(max(-1.0, min(1.0, dot))))
+                    applied["direction_error"] = (
+                        f"camera points {offset:.2f}° away from its target"
+                    )
+                else:
+                    applied["direction_verified"] = True
+        except Exception as exc:  # pragma: no cover - host-shape dependent
+            applied["direction_check_failed"] = str(exc)
 
     if exposure:
         ev = exposure.get("exposure_value")
