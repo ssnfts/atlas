@@ -430,6 +430,91 @@ def cmd_assign_material(params: dict) -> dict:
     }
 
 
+def cmd_create_mesh(params: dict) -> dict:
+    """
+    Build an Editable_Mesh from explicit vertices and faces.
+
+    Atomic host-side, like the sky and the material commands, but for a
+    different reason: a mesh *is* a node and could round-trip, yet assembling
+    one through generic ``call`` would mean a separate main-thread slot per
+    vertex. A single city block is a few thousand vertices, which is a few
+    thousand round trips — minutes of stalled UI for something that takes
+    milliseconds in one slot.
+
+    Vertices and faces are set with ``setVert``/``setFace`` rather than handed
+    to the ``mesh`` constructor as arrays. The constructor form needs MaxScript
+    arrays, and whether pymxs marshals a Python list into one is a question
+    about this specific pymxs build — the loop needs no such assumption and
+    costs nothing extra, because it already runs inside the host.
+
+    **Face indices arriving here are 0-based and are converted once, here.**
+    MaxScript is 1-based everywhere. Doing the shift at the boundary rather
+    than in the geometry code means it cannot be applied twice, or not at all —
+    an off-by-one that yields a building with its faces shuffled rather than an
+    error.
+
+    The reply includes the vertex count and the bounding box **read back from
+    the scene**, not echoed from the request. That is what lets the caller
+    detect the unit trap: send metres into a scene still set to inches and the
+    box comes back 39.37x too big, with nothing else to indicate it.
+    """
+    name = str(params.get("name") or "atlas_mesh")
+    verts = params.get("verts") or []
+    faces = params.get("faces") or []
+
+    if not verts:
+        raise ValueError("'verts' is empty")
+    if not faces:
+        raise ValueError("'faces' is empty")
+
+    vertex_count = len(verts)
+    for index, face in enumerate(faces):
+        if len(face) != 3:
+            raise ValueError(f"face {index} has {len(face)} indices; meshes are triangles")
+        for corner in face:
+            if not isinstance(corner, int) or corner < 0 or corner >= vertex_count:
+                raise ValueError(
+                    f"face {index} references vertex {corner}, outside 0..{vertex_count - 1}. "
+                    "Indices must be 0-based; the +1 for MaxScript happens here."
+                )
+
+    msh = rt.mesh(numverts=vertex_count, numfaces=len(faces))
+
+    for i, vertex in enumerate(verts):
+        x, y, z = vertex
+        rt.setVert(msh, i + 1, rt.Point3(float(x), float(y), float(z)))
+
+    for i, face in enumerate(faces):
+        a, b, c = face
+        rt.setFace(msh, i + 1, rt.Point3(a + 1, b + 1, c + 1))
+        # Smoothing group 0 = faceted. A building is flat planes meeting at hard
+        # corners; smoothing them averages the normals across the roof edge and
+        # gives every block a soft, inflated silhouette in the render.
+        rt.setFaceSmoothGroup(msh, i + 1, 0)
+
+    msh.name = name
+    if params.get("wirecolor"):
+        r, g, b = params["wirecolor"]
+        msh.wirecolor = rt.Color(float(r), float(g), float(b))
+
+    rt.update(msh)
+
+    low, high = msh.min, msh.max
+    return {
+        "node": str(msh.name),
+        "handle": int(msh.handle),
+        "class": str(rt.classOf(msh)),
+        "requested_verts": vertex_count,
+        "requested_faces": len(faces),
+        # Read back from the scene — the point of the exercise.
+        "vertex_count": int(rt.getNumVerts(msh)),
+        "face_count": int(rt.getNumFaces(msh)),
+        "bbox_min": [float(low.x), float(low.y), float(low.z)],
+        "bbox_max": [float(high.x), float(high.y), float(high.z)],
+        "units": str(rt.units.SystemType),
+    }
+
+
 def cmd_list_renderers(_params: dict) -> dict:
     """Enumerate installed renderer classes and report which slot holds what."""
     classes = [str(c) for c in rt.RendererClass.classes]
@@ -595,6 +680,7 @@ HANDLERS = {
     "scene_list": cmd_scene_list,
     "vray_sky_setup": cmd_vray_sky_setup,
     "assign_material": cmd_assign_material,
+    "create_mesh": cmd_create_mesh,
     "list_renderers": cmd_list_renderers,
     "set_renderer": cmd_set_renderer,
     "render": cmd_render,
