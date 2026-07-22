@@ -1,0 +1,317 @@
+"""
+Client for the 3ds Max bridge.
+
+Speaks newline-delimited JSON over TCP to ``bridge/atlas_max_bridge.py`` running
+inside 3ds Max. One connection per command, matching the bridge side.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+from typing import Any
+
+__all__ = ["MaxBridge", "MaxBridgeError", "MaxNotRunning"]
+
+DEFAULT_HOST = "127.0.0.1"
+# 9876 Houdini, 9877 ZBrush, 9878 Marvelous Designer -- see .env.example.
+DEFAULT_PORT = int(os.environ.get("ATLAS_MAX_PORT", "9879"))
+
+
+class MaxBridgeError(RuntimeError):
+    """A command reached 3ds Max and failed there."""
+
+
+class MaxNotRunning(MaxBridgeError):
+    """Nothing is listening — Max is closed or the bridge was never started."""
+
+
+class MaxBridge:
+    """Thin synchronous client. Cheap to construct; holds no socket between calls."""
+
+    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
+        self.host = host
+        self.port = port
+
+    # ── transport ────────────────────────────────────────────────────────────
+
+    def _send(self, payload: dict, timeout: float = 120.0) -> Any:
+        payload = {**payload, "timeout": timeout}
+        blob = json.dumps(payload).encode("utf-8") + b"\n"
+
+        try:
+            with socket.create_connection((self.host, self.port), timeout=10.0) as sock:
+                sock.settimeout(timeout + 15.0)
+                sock.sendall(blob)
+
+                buf = b""
+                while b"\n" not in buf:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+        except ConnectionRefusedError as exc:
+            raise MaxNotRunning(
+                f"Nothing is listening on {self.host}:{self.port}. Start 3ds Max, "
+                f"then run in its Python listener:\n"
+                f'    import sys; sys.path.append(r"{_bridge_dir()}")\n'
+                f"    import atlas_max_bridge; atlas_max_bridge.start()"
+            ) from exc
+        except socket.timeout as exc:
+            raise MaxBridgeError(
+                f"timed out talking to 3ds Max after {timeout}s. A modal dialog "
+                "open in Max blocks every command behind it."
+            ) from exc
+
+        if not buf:
+            raise MaxBridgeError("3ds Max closed the connection without replying")
+
+        line, _, _ = buf.partition(b"\n")
+        try:
+            response = json.loads(line.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise MaxBridgeError(f"malformed reply from Max: {line[:400]!r}") from exc
+
+        if not response.get("ok"):
+            raise MaxBridgeError(response.get("error", "unknown error in 3ds Max"))
+        return response.get("result")
+
+    # ── commands ─────────────────────────────────────────────────────────────
+
+    def ping(self) -> dict:
+        """Health check. Returns Max version, scene name and system units."""
+        return self._send({"command": "ping"}, timeout=15.0)
+
+    def is_available(self) -> bool:
+        try:
+            self.ping()
+            return True
+        except MaxBridgeError:
+            return False
+
+    def call(self, func: str, *args: Any, timeout: float = 120.0, **kwargs: Any) -> Any:
+        """Invoke a MaxScript function, e.g. ``call("Box", length=10)``."""
+        return self._send(
+            {
+                "command": "call",
+                "mode": "call",
+                "func": func,
+                "args": list(args),
+                "kwargs": kwargs,
+            },
+            timeout=timeout,
+        )
+
+    def get(self, path: str, timeout: float = 60.0) -> Any:
+        """
+        Read a MaxScript global or dotted path, e.g. ``get("units.SystemType")``.
+
+        Separate from :meth:`call` because the mode cannot be inferred: pymxs
+        value wrappers report as callable, so reading and invoking must be
+        distinguished by the caller, not guessed.
+        """
+        return self._send(
+            {"command": "call", "mode": "get", "func": path}, timeout=timeout
+        )
+
+    def set(self, path: str, value: Any, timeout: float = 60.0) -> Any:
+        """Write a MaxScript global or dotted path."""
+        return self._send(
+            {"command": "call", "mode": "set", "func": path, "value": value},
+            timeout=timeout,
+        )
+
+    def properties(
+        self, *, node: str | None = None, cls: str | None = None, timeout: float = 60.0
+    ) -> dict:
+        """
+        Introspect a live object's properties.
+
+        Use this instead of trusting remembered parameter names — V-Ray renames
+        sun/sky parameters between releases and a wrong name fails silently.
+        """
+        return self._send(
+            {"command": "properties", "node": node, "class": cls}, timeout=timeout
+        )
+
+    def node_get(self, node: str, prop: str, timeout: float = 60.0) -> Any:
+        """Read one property from a scene node."""
+        return self._send(
+            {"command": "node_get", "node": node, "prop": prop}, timeout=timeout
+        )
+
+    def node_set(self, node: str, prop: str, value: Any, timeout: float = 60.0) -> Any:
+        """
+        Write one property on a scene node.
+
+        Raises if the property does not exist on that object, rather than
+        letting MaxScript swallow the assignment silently.
+        """
+        return self._send(
+            {"command": "node_set", "node": node, "prop": prop, "value": value},
+            timeout=timeout,
+        )
+
+    def batch(
+        self, steps: list[dict], *, stop_on_error: bool = True, timeout: float = 300.0
+    ) -> list[dict]:
+        """
+        Run several commands inside one main-thread slot.
+
+        Correctness feature as much as a speed one: the steps are not interleaved
+        with UI events, so a read-modify-write sequence sees a consistent scene.
+        """
+        result = self._send(
+            {"command": "batch", "steps": steps, "stop_on_error": stop_on_error},
+            timeout=timeout,
+        )
+        return result["steps"]
+
+    def vray_sky_setup(
+        self,
+        *,
+        sun_node: str | None = None,
+        sky_class: str = "VRaySky",
+        params: dict | None = None,
+        timeout: float = 60.0,
+    ) -> dict:
+        """
+        Create a VRaySky, assign it to the environment slot and bind it to a sun.
+
+        Atomic by necessity: a texmap has no name or handle, so unlike a scene
+        node it cannot be returned to this process and referenced in a follow-up
+        call. The whole sequence runs in one main-thread slot inside Max.
+        """
+        return self._send(
+            {
+                "command": "vray_sky_setup",
+                "sun_node": sun_node,
+                "sky_class": sky_class,
+                "params": params or {},
+            },
+            timeout=timeout,
+        )
+
+    def maxscript(self, code: str, timeout: float = 120.0) -> Any:
+        """Evaluate raw MaxScript. Disabled unless ATLAS_ALLOW_MAXSCRIPT=1 in Max."""
+        return self._send({"command": "maxscript", "code": code}, timeout=timeout)
+
+    def viewport_capture(self, path: str, timeout: float = 60.0) -> dict:
+        """Save a viewport grab so a multimodal model can check its own work."""
+        return self._send(
+            {"command": "viewport_capture", "path": path}, timeout=timeout
+        )
+
+    def scene_list(
+        self, *, cls: str | None = None, prefix: str | None = None, timeout: float = 60.0
+    ) -> dict:
+        """List scene nodes, optionally filtered by class or name prefix."""
+        return self._send(
+            {"command": "scene_list", "class": cls, "prefix": prefix}, timeout=timeout
+        )
+
+    def assign_material(
+        self,
+        nodes: str | list[str],
+        *,
+        params: dict | None = None,
+        name: str | None = None,
+        material_class: str = "VRayMtl",
+        timeout: float = 120.0,
+    ) -> dict:
+        """Create a material and assign it to one or more nodes."""
+        return self._send(
+            {
+                "command": "assign_material",
+                "nodes": [nodes] if isinstance(nodes, str) else list(nodes),
+                "params": params or {},
+                "name": name,
+                "material_class": material_class,
+            },
+            timeout=timeout,
+        )
+
+    def list_renderers(self, timeout: float = 60.0) -> dict:
+        """Installed renderer classes, and which one each slot currently holds."""
+        return self._send({"command": "list_renderers"}, timeout=timeout)
+
+    def set_renderer(
+        self,
+        renderer: str,
+        *,
+        also_activeshade: bool = True,
+        also_medit: bool = False,
+        timeout: float = 120.0,
+    ) -> dict:
+        """
+        Set the production renderer. Accepts a prefix, e.g. ``"V_Ray_GPU"``.
+
+        Must be called **after** any resetMaxFile: resetting the scene reverts
+        the renderer to the application default.
+        """
+        return self._send(
+            {
+                "command": "set_renderer",
+                "renderer": renderer,
+                "also_activeshade": also_activeshade,
+                "also_medit": also_medit,
+            },
+            timeout=timeout,
+        )
+
+    def render(
+        self,
+        path: str,
+        *,
+        camera: str | None = None,
+        width: int = 640,
+        height: int = 360,
+        expect_renderer: str | None = None,
+        timeout: float = 1800.0,
+    ) -> dict:
+        """
+        Render to a file.
+
+        Pass ``expect_renderer`` to make the render fail loudly rather than
+        quietly producing an image from the wrong engine.
+
+        A render holds the Max main thread for its whole duration, so every
+        other command queues behind it — hence the long default timeout.
+        """
+        return self._send(
+            {
+                "command": "render",
+                "path": path,
+                "camera": camera,
+                "width": width,
+                "height": height,
+                "expect_renderer": expect_renderer,
+            },
+            timeout=timeout,
+        )
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def point3(x: float, y: float, z: float) -> dict:
+        """Wrap a triple so the bridge rebuilds it as a MaxScript Point3."""
+        return {"__point3__": [x, y, z]}
+
+    @staticmethod
+    def color(r: float, g: float, b: float) -> dict:
+        return {"__color__": [r, g, b]}
+
+    @staticmethod
+    def name(value: str) -> dict:
+        """A MaxScript #name literal."""
+        return {"__name__": value}
+
+    @staticmethod
+    def node(name: str) -> dict:
+        """Reference an existing scene node by name."""
+        return {"__node__": name}
+
+
+def _bridge_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bridge")

@@ -1,0 +1,31 @@
+# Virtual environment.
+# Built from 3ds Max's bundled Python (see README) and ~500 MB. A venv also
+# bakes absolute paths into its scripts, so a committed one would be broken on
+# any other machine anyway — recreate it, never copy it.
+.venv/
+venv/
+env/
+
+# Real configuration. Only .env.example is tracked.
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Render and capture output. Reproducible by running demo_shadow_test.py.
+out/
+
+# Node (atlas-mcp lives outside this repo, but keep this here in case it lands)
+node_modules/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

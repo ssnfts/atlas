@@ -1,0 +1,17 @@
+# Runtime
+# tzdata is NOT optional on Windows: there is no system IANA database, so
+# zoneinfo silently fails to resolve any zone without it. A wrong timezone
+# produces a plausible-looking but completely wrong sun angle.
+tzdata>=2024.1
+timezonefinder>=6.5
+requests>=2.32
+pyproj>=3.6
+shapely>=2.0
+
+# MCP server
+fastmcp>=2.0
+
+# Test-only: independent cross-validation of solar.py against NREL SPA.
+# pvlib implements a different algorithm (SPA, +-0.0003 deg) than our NOAA
+# implementation, so agreement between them is real evidence, not circular.
+pvlib>=0.11
