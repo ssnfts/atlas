@@ -299,6 +299,34 @@ class MaxBridge:
             results += self.batch(steps, stop_on_error=stop_on_error, timeout=timeout)
         return results
 
+    def build_material(
+        self,
+        graph: dict,
+        nodes: list[str],
+        *,
+        name: str | None = None,
+        timeout: float = 300.0,
+    ) -> dict:
+        """
+        Build a procedural texmap graph and assign the resulting material.
+
+        ``graph`` is a ``texturing.Graph.as_dict()``. Atomic host-side because a
+        texmap has no name or handle and cannot round-trip to this process.
+
+        Check ``rejected`` in the reply. Texmap parameter names could not be
+        verified offline, so a non-empty map is the loud failure that replaces a
+        quietly untextured render.
+        """
+        return self._send(
+            {
+                "command": "build_material",
+                "graph": graph,
+                "nodes": [nodes] if isinstance(nodes, str) else list(nodes),
+                "name": name,
+            },
+            timeout=timeout,
+        )
+
     def set_renderer(
         self,
         renderer: str,

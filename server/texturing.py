@@ -55,20 +55,33 @@ class TexturingError(ValueError):
     """A graph references something the host does not have, or is malformed."""
 
 
-# Texmap classes confirmed present on the live host (3ds Max 2027 + V-Ray GPU 7
-# update 3). `TextureTiles` was probed and is NOT present, which is why brick
-# banding is built from Checker rather than a dedicated tile map.
+# Texmap classes verified **constructible** on the live host (3ds Max 2027 +
+# V-Ray GPU 7 update 3) — each one was actually instantiated, not merely read
+# from a list.
+#
+# That distinction cost a real bug. `textureMap.classes` enumerates 23 native
+# classes, and four of them cannot be constructed at all: `Wood`,
+# `fallofftextureMap`, `NoTexture`. The first version of this module used
+# `fallofftextureMap` for the glass Fresnel and `Wood` for timber grain, both
+# taken from that list, and both would have failed at build time. Membership in
+# the class list is not usability — the real Fresnel map is `Falloff`, and there
+# is no constructible wood map on this host at all.
+#
+# `TextureTiles` is absent entirely, which is why brick banding uses Checker.
 TEXMAP_CLASSES = frozenset({
     # native
-    "NoTexture", "Raytrace", "Checker", "Marble", "Wood", "Dent", "Mask",
-    "RGB_Tint", "Mix", "Noise", "Bitmaptexture", "Reflect_Refract",
-    "Flat_Mirror", "Gradient", "CompositeTexturemap", "RGB_Multiply",
-    "fallofftextureMap", "output", "Color_Correction", "MultiTile",
-    "Cellular", "Speckle", "Smoke",
+    "Raytrace", "Checker", "Marble", "Dent", "Mask", "RGB_Tint", "Mix", "Noise",
+    "Bitmaptexture", "Reflect_Refract", "Flat_Mirror", "Gradient",
+    "CompositeTexturemap", "RGB_Multiply", "Falloff", "output",
+    "Color_Correction", "MultiTile", "Cellular", "Speckle", "Smoke",
     # V-Ray
     "VRayDirt", "VRayTriplanarTex", "VRayNoiseTex", "VRayBitmap", "VRayColor",
     "VRayCompTex", "VRayEdgesTex", "VRayDistanceTex", "VRayMultiSubTex",
 })
+
+# Listed by the host but NOT constructible. Kept explicit so a plausible name
+# cannot drift back in — every one of these reads as correct.
+NOT_CONSTRUCTIBLE = frozenset({"Wood", "fallofftextureMap", "NoTexture"})
 
 # VRayMtl texmap channel slots, base names only — the `_on` and `_multiplier`
 # companions are derived, never written by hand.
@@ -265,8 +278,11 @@ def _triplanar(node_id: str, source: str, size_m: float) -> TexNode:
     usable on massing that has no texture coordinates. It also removes the
     stretching a planar projection puts on a wall that is not axis-aligned.
     """
+    # Parameter names discovered from a live VRayTriplanarTex: the size is
+    # `size` and the input is `texture`. `texture_size`/`texmap` read as correct
+    # and are both rejected by the host.
     return TexNode(node_id, "VRayTriplanarTex",
-                   params={"texture_size": size_m}, inputs={"texmap": source})
+                   params={"size": size_m}, inputs={"texture": source})
 
 
 def _dirt(node_id: str, source: str, radius_m: float) -> TexNode:
@@ -277,8 +293,14 @@ def _dirt(node_id: str, source: str, radius_m: float) -> TexNode:
     buildings are dirtier where surfaces meet, and a flat diffuse has none of
     that regardless of how good the colour is.
     """
+    # `unoccluded_color` and `occluded_color` are *colour* slots; feeding a
+    # texmap needs the parallel `texmap_unoccluded_color` slot, which — like
+    # every texmap slot on this host — has an `_on` flag defaulting False.
+    # Setting the map without it produces plain occlusion and loses the base
+    # colour entirely, which reads as a uniformly grey building.
     return TexNode(node_id, "VRayDirt",
-                   params={"radius": radius_m}, inputs={"unoccluded_color": source})
+                   params={"radius": radius_m, "texmap_unoccluded_color_on": True},
+                   inputs={"texmap_unoccluded_color": source})
 
 
 def _per_building_variation(node_id: str, source: str, hue_deg: float) -> TexNode:
@@ -290,8 +312,11 @@ def _per_building_variation(node_id: str, source: str, hue_deg: float) -> TexNod
     design — 1281 buildings, ~7 materials — instead of regressing to one
     instance per building, which is what a naive "vary the colour" change does.
     """
+    # `random_by_node_handle` is the live flag that makes one material vary per
+    # node — the mechanism that keeps 1281 buildings on ~7 materials.
     return TexNode(node_id, "VRayMultiSubTex",
-                   params={"mode": "by_node_handle", "hue_shift": hue_deg},
+                   params={"random_by_node_handle": True,
+                           "default_texmap_on": True, "hue_shift": hue_deg},
                    inputs={"default_texmap": source})
 
 
@@ -308,11 +333,13 @@ def _masonry_graph(key: str, *, grain_m: float, dirt_m: float, bump: float,
     graph = Graph(key=key, base=materials.PRESETS[key], note=note)
     r, g, b = graph.base.diffuse
 
-    graph.add(TexNode("base", "VRayColor", params={"color": [r, g, b]}))
+    graph.add(TexNode("base", "VRayColor",
+                      params={"red": r / 255.0, "green": g / 255.0,
+                              "blue": b / 255.0}))
     graph.add(TexNode("grain", "Noise",
                       params={"size": grain_m, "levels": 3.0, "phase": 0.0}))
     graph.add(_triplanar("grain_world", "grain", grain_m))
-    graph.add(TexNode("tinted", "Mix", params={"mix_amount": 0.28},
+    graph.add(TexNode("tinted", "Mix", params={"mixAmount": 0.28},
                       inputs={"map1": "base", "map2": "grain_world"}))
     graph.add(_per_building_variation("varied", "tinted", hue))
     graph.add(_dirt("weathered", "varied", dirt_m))
@@ -326,7 +353,7 @@ def _masonry_graph(key: str, *, grain_m: float, dirt_m: float, bump: float,
 
     # Weathering also dulls reflection where dirt collects, which is what stops
     # a wall reading as uniformly polished.
-    graph.add(TexNode("gloss_break", "Mix", params={"mix_amount": 0.35},
+    graph.add(TexNode("gloss_break", "Mix", params={"mixAmount": 0.35},
                       inputs={"map1": "base", "map2": "relief_world"}))
     graph.bind("texmap_reflectionGlossiness", "gloss_break")
     return graph
@@ -364,18 +391,27 @@ def _build_graphs() -> dict:
         note="roofing membrane and paving; little hue variation, it is all bitumen",
     )
 
-    # Wood: Marble is the wrong grain, Wood is the right one and is present.
-    wood = Graph("wood", materials.PRESETS["wood"], note="plank-scale grain")
+    # Wood. The obvious choice is the `Wood` map, and it is in the host's class
+    # list — but it cannot be constructed on this build, so it is unusable.
+    # `Marble` is the next best fit: its veining is directional and stretches
+    # into a passable plank grain under an anisotropic triplanar size. Not as
+    # good as a real wood map, and said so rather than implied.
+    wood = Graph("wood", materials.PRESETS["wood"],
+                 note="Marble veining as plank grain — the Wood map is listed "
+                      "by the host but is not constructible on this build")
     r, g, b = wood.base.diffuse
-    wood.add(TexNode("base", "VRayColor", params={"color": [r, g, b]}))
-    wood.add(TexNode("grain", "Wood", params={"grain_size": 0.05, "levels": 3.0}))
+    wood.add(TexNode("base", "VRayColor",
+                      params={"red": r / 255.0, "green": g / 255.0,
+                              "blue": b / 255.0}))
+    wood.add(TexNode("grain", "Marble", params={"size": 0.05, "vein_width": 0.02}))
     wood.add(_triplanar("grain_world", "grain", 0.05))
-    wood.add(TexNode("tinted", "Mix", params={"mix_amount": 0.4},
+    wood.add(TexNode("tinted", "Mix", params={"mixAmount": 0.4},
                      inputs={"map1": "base", "map2": "grain_world"}))
     wood.add(_per_building_variation("varied", "tinted", 7.0))
     wood.add(_dirt("weathered", "varied", 0.2))
     wood.bind("texmap_diffuse", "weathered")
-    wood.add(TexNode("relief", "Wood", params={"grain_size": 0.02, "bump_multiplier": 24.0}))
+    wood.add(TexNode("relief", "Marble",
+                     params={"size": 0.02, "bump_multiplier": 24.0}))
     wood.add(_triplanar("relief_world", "relief", 0.02))
     wood.bind("texmap_bump", "relief_world")
     graphs["wood"] = wood
@@ -386,18 +422,22 @@ def _build_graphs() -> dict:
     glass = Graph("glass", materials.PRESETS["glass"],
                   note="Fresnel falloff plus storey banding; opaque, not refractive")
     r, g, b = glass.base.diffuse
-    glass.add(TexNode("base", "VRayColor", params={"color": [r, g, b]}))
-    glass.add(TexNode("mullions", "Checker",
-                      params={"u_tiling": 1.0, "v_tiling": 1.0, "soften": 0.05}))
+    glass.add(TexNode("base", "VRayColor",
+                      params={"red": r / 255.0, "green": g / 255.0,
+                              "blue": b / 255.0}))
+    # Checker's tiling lives on a `coords` object rather than as direct
+    # parameters; the triplanar wrapper already sets the physical scale, so the
+    # only thing worth setting here is the edge softness.
+    glass.add(TexNode("mullions", "Checker", params={"Soften": 0.05}))
     glass.add(_triplanar("mullions_world", "mullions", 1.5))
-    glass.add(TexNode("banded", "Mix", params={"mix_amount": 0.18},
+    glass.add(TexNode("banded", "Mix", params={"mixAmount": 0.18},
                       inputs={"map1": "base", "map2": "mullions_world"}))
     glass.add(_per_building_variation("varied", "banded", 4.0))
     glass.bind("texmap_diffuse", "varied")
-    glass.add(TexNode("fresnel", "fallofftextureMap", params={"falloff_type": "Fresnel"}))
+    glass.add(TexNode("fresnel", "Falloff", params={"type": 2}))  # 2 = Fresnel
     glass.bind("texmap_reflectionGlossiness", "fresnel")
     glass.add(TexNode("panel_relief", "Checker",
-                      params={"u_tiling": 1.0, "v_tiling": 1.0, "bump_multiplier": 8.0}))
+                      params={"Soften": 0.02, "bump_multiplier": 8.0}))
     glass.add(_triplanar("panel_world", "panel_relief", 1.5))
     glass.bind("texmap_bump", "panel_world")
     graphs["glass"] = glass
@@ -406,10 +446,12 @@ def _build_graphs() -> dict:
     # is what distinguishes a warehouse roof from a mirror.
     metal = Graph("metal", materials.PRESETS["metal"], note="brushed streaking, light dirt")
     r, g, b = metal.base.diffuse
-    metal.add(TexNode("base", "VRayColor", params={"color": [r, g, b]}))
+    metal.add(TexNode("base", "VRayColor",
+                      params={"red": r / 255.0, "green": g / 255.0,
+                              "blue": b / 255.0}))
     metal.add(TexNode("streak", "Noise", params={"size": 0.05, "levels": 2.0}))
     metal.add(_triplanar("streak_world", "streak", 0.05))
-    metal.add(TexNode("brushed", "Mix", params={"mix_amount": 0.2},
+    metal.add(TexNode("brushed", "Mix", params={"mixAmount": 0.2},
                       inputs={"map1": "base", "map2": "streak_world"}))
     metal.add(_per_building_variation("varied", "brushed", 3.0))
     metal.add(_dirt("weathered", "varied", 0.15))
@@ -425,14 +467,16 @@ def _build_graphs() -> dict:
     ground = Graph("ground", materials.PRESETS["ground"],
                    note="coarse terrain breakup; no per-node variation, it is one mesh")
     r, g, b = ground.base.diffuse
-    ground.add(TexNode("base", "VRayColor", params={"color": [r, g, b]}))
+    ground.add(TexNode("base", "VRayColor",
+                      params={"red": r / 255.0, "green": g / 255.0,
+                              "blue": b / 255.0}))
     ground.add(TexNode("coarse", "Noise", params={"size": 8.0, "levels": 4.0}))
     ground.add(_triplanar("coarse_world", "coarse", 8.0))
     ground.add(TexNode("fine", "Speckle", params={"size": 0.6}))
     ground.add(_triplanar("fine_world", "fine", 0.6))
-    ground.add(TexNode("mixed", "Mix", params={"mix_amount": 0.4},
+    ground.add(TexNode("mixed", "Mix", params={"mixAmount": 0.4},
                        inputs={"map1": "coarse_world", "map2": "fine_world"}))
-    ground.add(TexNode("tinted", "Mix", params={"mix_amount": 0.35},
+    ground.add(TexNode("tinted", "Mix", params={"mixAmount": 0.35},
                        inputs={"map1": "base", "map2": "mixed"}))
     ground.bind("texmap_diffuse", "tinted")
     ground.add(TexNode("relief", "Noise", params={"size": 3.0, "bump_multiplier": 14.0}))

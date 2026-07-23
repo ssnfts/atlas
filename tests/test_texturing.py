@@ -61,6 +61,34 @@ def test_every_channel_is_a_confirmed_vraymtl_slot():
             assert slot in TEXMAP_SLOTS, f"{graph.key} writes unconfirmed slot {slot!r}"
 
 
+def test_listed_but_unconstructible_classes_are_never_used():
+    """
+    Regression, and the real lesson of this module. `textureMap.classes` lists
+    classes that cannot actually be instantiated — `Wood` and
+    `fallofftextureMap` among them. The first version of this file took both
+    from that list and would have failed at build time: the Fresnel map is
+    really `Falloff`, and there is no constructible wood map on this host.
+
+    Membership in a class list is not usability. These were verified by
+    constructing each one.
+    """
+    from texturing import NOT_CONSTRUCTIBLE
+
+    assert NOT_CONSTRUCTIBLE.isdisjoint(TEXMAP_CLASSES)
+    for graph in GRAPHS.values():
+        for node in graph.nodes.values():
+            assert node.cls not in NOT_CONSTRUCTIBLE, (
+                f"{graph.key}/{node.id} uses {node.cls!r}, which is listed by the "
+                "host but cannot be constructed"
+            )
+
+
+def test_glass_fresnel_uses_the_constructible_falloff_name():
+    nodes = {n.cls for n in GRAPHS["glass"].nodes.values()}
+    assert "Falloff" in nodes
+    assert "fallofftextureMap" not in nodes
+
+
 def test_texture_tiles_is_not_used():
     """
     `TextureTiles` was probed on the host and is absent — brick banding has to
@@ -214,14 +242,14 @@ def test_projection_sizes_are_physical_and_plausible():
         for node in graph.nodes.values():
             if node.cls != "VRayTriplanarTex":
                 continue
-            size = node.params["texture_size"]
+            size = node.params["size"]
             assert 0.005 <= size <= 20.0, f"{graph.key}/{node.id} size {size} m"
 
 
 def test_brick_pattern_is_finer_than_concrete():
     """Ordering is what a render shows: brick courses are smaller than board marks."""
     def size(key):
-        return min(n.params["texture_size"] for n in GRAPHS[key].nodes.values()
+        return min(n.params["size"] for n in GRAPHS[key].nodes.values()
                    if n.cls == "VRayTriplanarTex")
 
     assert size("brick") < size("concrete")
@@ -306,7 +334,7 @@ def test_glass_uses_fresnel_not_dirt():
     facade would be wrong.
     """
     nodes = GRAPHS["glass"].nodes.values()
-    assert any(n.cls == "fallofftextureMap" for n in nodes)
+    assert any(n.cls == "Falloff" for n in nodes)
     assert not any(n.cls == "VRayDirt" for n in nodes)
 
 
@@ -328,7 +356,10 @@ def test_graph_base_colour_matches_the_flat_preset():
         assert graph.base is materials.PRESETS[key]
         base_node = graph.nodes.get("base")
         if base_node is not None:
-            assert base_node.params["color"] == list(graph.base.diffuse)
+            # VRayColor takes 0..1 float channels, not the 0..255 bytes the
+            # MaterialSpec carries — a live probe rejected a plain colour list.
+            assert base_node.params["red"] * 255.0 == pytest.approx(graph.base.diffuse[0])
+            assert base_node.params["blue"] * 255.0 == pytest.approx(graph.base.diffuse[2])
 
 
 def test_graph_for_building_follows_the_existing_tag_precedence():

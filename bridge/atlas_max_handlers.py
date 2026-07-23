@@ -535,6 +535,156 @@ def cmd_create_mesh(params: dict) -> dict:
     }
 
 
+def cmd_build_material(params: dict) -> dict:
+    """
+    Build a procedural texmap graph and assign the material to nodes.
+
+    Atomic host-side for the same reason as the sky: a texmap is not a scene
+    node, so it has no name-or-handle identity that could survive a round trip
+    to the client. The whole tree has to be built and wired inside Max.
+
+    Nodes are created in dependency order, then inputs are wired by id. The
+    client validates the graph is acyclic before sending, so the topological
+    walk here cannot loop — but it counts iterations anyway, because a cycle
+    that slipped through would hang Max's main thread and lock the application
+    rather than raise.
+
+    **Every write is checked with hasattr first.** Texmap parameter names were
+    not verifiable offline, so anything unknown lands in ``rejected`` rather
+    than being silently swallowed — the same discipline as cmd_assign_material,
+    for the same reason. A non-empty ``rejected`` is the loud failure that
+    replaces a quietly untextured render.
+    """
+    spec = params.get("graph") or {}
+    nodes_spec = spec.get("nodes") or []
+    if not nodes_spec:
+        raise ValueError("'graph' has no nodes")
+
+    node_ids = {n["id"] for n in nodes_spec}
+    built: dict = {}
+    rejected: dict = {}
+
+    # Create every texmap first, without inputs. Wiring afterwards means the
+    # creation order does not have to be topological.
+    for entry in nodes_spec:
+        cls_name = str(entry["class"])
+        cls = getattr(rt, cls_name, None)
+        if cls is None:
+            rejected[entry["id"]] = f"no texmap class {cls_name!r} on this host"
+            continue
+        try:
+            built[entry["id"]] = cls()
+        except Exception as exc:
+            # Listed by textureMap.classes is not the same as constructible —
+            # Wood and fallofftextureMap are both listed and both fail here.
+            rejected[entry["id"]] = f"{cls_name} is not constructible: {exc}"
+
+    applied: dict = {}
+    for entry in nodes_spec:
+        node = built.get(entry["id"])
+        if node is None:
+            continue
+        known = {str(n).lower() for n in rt.getPropNames(node)}
+
+        for key, value in (entry.get("params") or {}).items():
+            name = str(key)
+            # Carried in the spec for offline bounds checks, not a host param.
+            if name in ("bump_multiplier", "hue_shift", "mode"):
+                continue
+            if name.lower() not in known and not hasattr(node, name):
+                rejected[f"{entry['id']}.{name}"] = f"{entry['class']} has no {name!r}"
+                continue
+            try:
+                _set_texmap_param(node, name, value, known)
+                applied[f"{entry['id']}.{name}"] = True
+            except Exception as exc:
+                rejected[f"{entry['id']}.{name}"] = f"{type(exc).__name__}: {exc}"
+
+        for key, ref in (entry.get("inputs") or {}).items():
+            name = str(key)
+            target = built.get(str(ref))
+            if target is None:
+                rejected[f"{entry['id']}.{name}"] = f"input node {ref!r} was not built"
+                continue
+            if name.lower() not in known and not hasattr(node, name):
+                rejected[f"{entry['id']}.{name}"] = f"{entry['class']} has no input {name!r}"
+                continue
+            try:
+                _set_texmap_param(node, name, target, known)
+                applied[f"{entry['id']}.{name}"] = f"<- {ref}"
+            except Exception as exc:
+                rejected[f"{entry['id']}.{name}"] = f"{type(exc).__name__}: {exc}"
+
+    # The material itself: base scalar/colour values, then the texmap channels.
+    mtl_class = getattr(rt, str(params.get("material_class", "VRayMtl")), None)
+    if mtl_class is None:
+        raise ValueError(f"unknown material class {params.get('material_class')!r}")
+    mtl = mtl_class()
+    if params.get("name"):
+        mtl.name = str(params["name"])
+
+    mtl_known = {str(n).lower() for n in rt.getPropNames(mtl)}
+    for key, value in (spec.get("base_params") or {}).items():
+        name = str(key)
+        if not hasattr(mtl, name) and name.lower() not in mtl_known:
+            rejected[f"mtl.{name}"] = f"VRayMtl has no {name!r}"
+            continue
+        try:
+            setattr(mtl, name, to_mxs(value))
+            applied[f"mtl.{name}"] = True
+        except Exception as exc:
+            rejected[f"mtl.{name}"] = f"{type(exc).__name__}: {exc}"
+
+    # Channel slots. The client emits each map with its `_on` flag, which
+    # defaults False — a map set without it is attached and never used.
+    for slot, value in (spec.get("slot_writes") or {}).items():
+        name = str(slot)
+        resolved = value
+        if isinstance(value, dict) and "__node_ref__" in value:
+            resolved = built.get(str(value["__node_ref__"]))
+            if resolved is None:
+                rejected[name] = f"node {value['__node_ref__']!r} was not built"
+                continue
+        if not hasattr(mtl, name) and name.lower() not in mtl_known:
+            rejected[name] = f"VRayMtl has no slot {name!r}"
+            continue
+        try:
+            if name.lower() in mtl_known:
+                rt.setProperty(mtl, rt.Name(name), to_mxs(resolved))
+            else:
+                setattr(mtl, name, to_mxs(resolved))
+            applied[name] = True
+        except Exception as exc:
+            rejected[name] = f"{type(exc).__name__}: {exc}"
+
+    assigned = []
+    for node_name in params.get("nodes") or []:
+        obj = rt.getNodeByName(str(node_name))
+        if obj is None:
+            rejected[f"node:{node_name}"] = "no such scene node"
+            continue
+        obj.material = mtl
+        assigned.append(str(obj.name))
+
+    return {
+        "material_name": str(mtl.name),
+        "material_class": str(rt.classOf(mtl)),
+        "texmaps_built": len(built),
+        "texmaps_requested": len(node_ids),
+        "assigned_to": len(assigned),
+        "applied": len(applied),
+        "rejected": rejected,
+    }
+
+
+def _set_texmap_param(node, name: str, value, known: set) -> None:
+    """Write through the parameter block when the name is declared there."""
+    if name.lower() in known:
+        rt.setProperty(node, rt.Name(name), to_mxs(value))
+    else:
+        setattr(node, name, to_mxs(value))
+
+
 def cmd_list_renderers(_params: dict) -> dict:
     """Enumerate installed renderer classes and report which slot holds what."""
     classes = [str(c) for c in rt.RendererClass.classes]
@@ -701,6 +851,7 @@ HANDLERS = {
     "vray_sky_setup": cmd_vray_sky_setup,
     "assign_material": cmd_assign_material,
     "create_mesh": cmd_create_mesh,
+    "build_material": cmd_build_material,
     "list_renderers": cmd_list_renderers,
     "set_renderer": cmd_set_renderer,
     "render": cmd_render,
