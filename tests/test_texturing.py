@@ -258,21 +258,42 @@ def test_brick_pattern_is_finer_than_concrete():
 
 # ── Bounded variation ─────────────────────────────────────────────────────────
 
-def test_per_building_variation_preserves_shared_materials():
+def test_multisubtex_is_not_used():
     """
-    The design constraint from materials.py: 1281 buildings collapse to ~7
-    materials. Variation comes from VRayMultiSubTex varying per *node*, not
-    from one material per building, which would regress the whole scheme.
+    Regression, measured on the live host. VRayMultiSubTex was used for
+    per-building tint variation and silently destroyed the base colour: with an
+    empty sub-texture list it falls through to `default_color` (a 127.5 grey)
+    rather than the wired `default_texmap`, so every material collapsed to the
+    same grey — brick and concrete both rendered rgb(81,74,70) despite brick
+    being reddish. Under a bright sun that reads as blown-out white.
+
+    Removing it restored correct colour: brick rgb(66,31,24), a red-blue spread
+    of 42 against concrete's neutral 11.
+
+    Per-building variation is therefore NOT implemented. Reinstating it needs a
+    populated sub-texture list, not just the node.
     """
-    for key in ("concrete", "brick", "stone", "plaster", "glass", "metal", "wood"):
-        assert any(n.cls == "VRayMultiSubTex" for n in GRAPHS[key].nodes.values()), (
-            f"{key} has no per-node variation"
+    for key, graph in GRAPHS.items():
+        assert not any(n.cls == "VRayMultiSubTex" for n in graph.nodes.values()), (
+            f"{key} reintroduces VRayMultiSubTex, which flattens the base colour"
         )
 
 
-def test_ground_has_no_per_node_variation():
-    """The terrain is a single mesh; per-node variation would cost a lookup for nothing."""
-    assert not any(n.cls == "VRayMultiSubTex" for n in GRAPHS["ground"].nodes.values())
+def test_materials_stay_distinguishable_by_base_colour():
+    """
+    What the MultiSubTex bug actually broke. Every graph must carry its own base
+    colour through to the material — if two materials converge, the whole point
+    of tag-driven shading is gone and it is invisible in any structural test.
+    """
+    reds = {}
+    for key, graph in GRAPHS.items():
+        base = graph.nodes.get("base")
+        if base is not None:
+            reds[key] = (base.params["red"], base.params["green"], base.params["blue"])
+    assert reds["brick"] != reds["concrete"]
+    # Brick is reddish; concrete is not. Asserting the ordering, not just difference.
+    assert reds["brick"][0] - reds["brick"][2] > 0.15
+    assert abs(reds["concrete"][0] - reds["concrete"][2]) < 0.1
 
 
 def test_hue_jitter_is_bounded():

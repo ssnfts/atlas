@@ -303,21 +303,24 @@ def _dirt(node_id: str, source: str, radius_m: float) -> TexNode:
                    inputs={"texmap_unoccluded_color": source})
 
 
-def _per_building_variation(node_id: str, source: str, hue_deg: float) -> TexNode:
-    """
-    Per-node colour jitter from a single shared material.
-
-    ``VRayMultiSubTex`` can select by node handle, so one material gives every
-    building a slightly different tint. That preserves the shared-material
-    design — 1281 buildings, ~7 materials — instead of regressing to one
-    instance per building, which is what a naive "vary the colour" change does.
-    """
-    # `random_by_node_handle` is the live flag that makes one material vary per
-    # node — the mechanism that keeps 1281 buildings on ~7 materials.
-    return TexNode(node_id, "VRayMultiSubTex",
-                   params={"random_by_node_handle": True,
-                           "default_texmap_on": True, "hue_shift": hue_deg},
-                   inputs={"default_texmap": source})
+# Per-building colour variation is NOT implemented, and the removed attempt is
+# worth recording so it is not retried the same way.
+#
+# `VRayMultiSubTex` looked ideal: it selects a sub-texture per node, which would
+# have given every building a slightly different tint from one shared material,
+# preserving the ~7-materials-for-1281-buildings design. It does not work that
+# way when the sub-texture list is empty. Measured on the live host, the whole
+# graph collapsed to a uniform grey regardless of the base colour — brick and
+# concrete rendered identically at rgb(81,74,70) — because with nothing in the
+# list it falls through to `default_color` (a 127.5 grey) rather than to the
+# wired `default_texmap`. Under a bright sun that reads as blown-out white.
+#
+# Removing it restored correct colour immediately: brick rgb(66,31,24) with a
+# red-blue spread of 42, concrete neutral at 11, glass bluish at -4.
+#
+# Doing this properly means populating the sub-texture list with N tinted
+# variants and letting `random_by_node_handle` choose between them. That is a
+# real feature, not a parameter tweak, and it is not attempted here.
 
 
 def _masonry_graph(key: str, *, grain_m: float, dirt_m: float, bump: float,
@@ -341,8 +344,7 @@ def _masonry_graph(key: str, *, grain_m: float, dirt_m: float, bump: float,
     graph.add(_triplanar("grain_world", "grain", grain_m))
     graph.add(TexNode("tinted", "Mix", params={"mixAmount": 0.28},
                       inputs={"map1": "base", "map2": "grain_world"}))
-    graph.add(_per_building_variation("varied", "tinted", hue))
-    graph.add(_dirt("weathered", "varied", dirt_m))
+    graph.add(_dirt("weathered", "tinted", dirt_m))
     graph.bind("texmap_diffuse", "weathered")
 
     graph.add(TexNode("relief", "Noise",
@@ -407,8 +409,7 @@ def _build_graphs() -> dict:
     wood.add(_triplanar("grain_world", "grain", 0.05))
     wood.add(TexNode("tinted", "Mix", params={"mixAmount": 0.4},
                      inputs={"map1": "base", "map2": "grain_world"}))
-    wood.add(_per_building_variation("varied", "tinted", 7.0))
-    wood.add(_dirt("weathered", "varied", 0.2))
+    wood.add(_dirt("weathered", "tinted", 0.2))
     wood.bind("texmap_diffuse", "weathered")
     wood.add(TexNode("relief", "Marble",
                      params={"size": 0.02, "bump_multiplier": 24.0}))
@@ -432,8 +433,7 @@ def _build_graphs() -> dict:
     glass.add(_triplanar("mullions_world", "mullions", 1.5))
     glass.add(TexNode("banded", "Mix", params={"mixAmount": 0.18},
                       inputs={"map1": "base", "map2": "mullions_world"}))
-    glass.add(_per_building_variation("varied", "banded", 4.0))
-    glass.bind("texmap_diffuse", "varied")
+    glass.bind("texmap_diffuse", "banded")
     glass.add(TexNode("fresnel", "Falloff", params={"type": 2}))  # 2 = Fresnel
     glass.bind("texmap_reflectionGlossiness", "fresnel")
     glass.add(TexNode("panel_relief", "Checker",
@@ -453,8 +453,7 @@ def _build_graphs() -> dict:
     metal.add(_triplanar("streak_world", "streak", 0.05))
     metal.add(TexNode("brushed", "Mix", params={"mixAmount": 0.2},
                       inputs={"map1": "base", "map2": "streak_world"}))
-    metal.add(_per_building_variation("varied", "brushed", 3.0))
-    metal.add(_dirt("weathered", "varied", 0.15))
+    metal.add(_dirt("weathered", "brushed", 0.15))
     metal.bind("texmap_diffuse", "weathered")
     metal.bind("texmap_reflectionGlossiness", "streak_world")
     metal.add(TexNode("relief", "Noise", params={"size": 0.02, "bump_multiplier": 6.0}))
