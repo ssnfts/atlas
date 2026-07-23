@@ -29,3 +29,8 @@ node_modules/
 *.swp
 Thumbs.db
 desktop.ini
+
+# Claude Code local state. Skills are installed per-machine by the environment
+# and are not part of this project — 45 of them were swept into a commit by an
+# over-broad `git add -A`.
+.claude/
