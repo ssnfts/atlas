@@ -73,19 +73,19 @@ def test_straight_ribbon_is_length_times_width():
 
 def test_straight_ribbon_is_exactly_width_wide():
     p = _path([(0.0, 0.0), (50.0, 0.0)])
-    left, right = roadway.offset_ribbon(p.xy, 8.0)
+    left, right, _ = roadway.offset_ribbon(p.xy, 8.0)
     for (lx, ly), (rx, ry) in zip(left, right):
         assert math.hypot(lx - rx, ly - ry) == pytest.approx(8.0)
 
 
 def test_left_is_counter_clockwise_of_travel():
     # Travelling +X (east), the left edge must be to +Y (north).
-    left, right = roadway.offset_ribbon([(0.0, 0.0), (10.0, 0.0)], 4.0)
+    left, right, _ = roadway.offset_ribbon([(0.0, 0.0), (10.0, 0.0)], 4.0)
     assert left[0][1] > 0 and right[0][1] < 0
 
 
 def test_endpoints_of_open_path_are_square():
-    left, right = roadway.offset_ribbon([(0.0, 0.0), (10.0, 0.0)], 4.0)
+    left, right, _ = roadway.offset_ribbon([(0.0, 0.0), (10.0, 0.0)], 4.0)
     # Square end cap: the two end vertices share the start's x.
     assert left[0][0] == pytest.approx(0.0)
     assert right[0][0] == pytest.approx(0.0)
@@ -102,7 +102,7 @@ def test_right_angle_corner_conserves_length():
 
 def test_mitre_widens_the_outer_corner():
     # At a 90 deg bend the mitred cross-section is width / cos(45) = width * sqrt2.
-    left, right = roadway.offset_ribbon(
+    left, right, _ = roadway.offset_ribbon(
         [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0)], 6.0
     )
     # middle cross-section is index 1
@@ -127,7 +127,7 @@ def test_closed_loop_has_no_end_caps_and_wraps():
     # A square loop, given closed (last vertex repeats the first).
     sq = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0), (0.0, 0.0)]
     p = _path(sq, closed=True)
-    left, right = roadway.offset_ribbon(p.xy, 10.0, closed=True)
+    left, right, _ = roadway.offset_ribbon(p.xy, 10.0, closed=True)
     # Duplicate closing vertex dropped: four distinct cross-sections, not five.
     assert len(left) == 4 and len(right) == 4
     mesh = roadway.ribbon_mesh(p, width=10.0)
@@ -149,18 +149,142 @@ def test_closed_square_loop_area_matches_annulus():
 # ── ground draping ─────────────────────────────────────────────────────────────
 
 def test_ground_callable_lifts_the_ribbon():
+    frame = SceneFrame(24.47, 54.60)
     p = _path([(0.0, 0.0), (10.0, 0.0)])
-    mesh = roadway.ribbon_mesh(p, width=4.0, ground=lambda x, y: 12.0, lift=0.05)
+    mesh = roadway.ribbon_mesh(p, width=4.0, frame=frame,
+                               ground=lambda lat, lon: 12.0, lift=0.05)
     assert all(v[2] == pytest.approx(12.05) for v in mesh.verts)
 
 
-def test_ground_failure_falls_back_to_lift_not_raise():
-    def bad_ground(x, y):
+def test_ground_probe_is_called_with_geodetic_not_scene_metres():
+    """
+    The bug this locks: the probe takes (lat, lon), the ribbon is in metres.
+
+    Calling it with scene metres made every sample raise, a blanket except
+    swallowed it, and a 5 km circuit came back flat at `lift` — buried under
+    terrain that ranged over 41 m, with nothing raised anywhere. So assert the
+    probe actually receives coordinates near the frame origin.
+    """
+    frame = SceneFrame(24.47, 54.60)
+    seen: list[tuple[float, float]] = []
+
+    def probe(lat, lon):
+        seen.append((lat, lon))
+        return 5.0
+
+    p = _path([(0.0, 0.0), (100.0, 0.0)])
+    roadway.ribbon_mesh(p, width=4.0, frame=frame, ground=probe)
+
+    assert seen, "ground probe was never called"
+    for lat, lon in seen:
+        assert abs(lat - 24.47) < 0.01, f"latitude {lat} is not geodetic"
+        assert abs(lon - 54.60) < 0.01, f"longitude {lon} is not geodetic"
+
+
+def test_ground_without_frame_is_refused():
+    p = _path([(0.0, 0.0), (10.0, 0.0)])
+    with pytest.raises(roadway.RoadwayError, match="frame"):
+        roadway.ribbon_mesh(p, width=4.0, ground=lambda lat, lon: 1.0)
+
+
+def test_ribbon_entirely_outside_the_patch_raises():
+    frame = SceneFrame(24.47, 54.60)
+
+    def outside(lat, lon):
         raise ValueError("outside patch")
 
     p = _path([(0.0, 0.0), (10.0, 0.0)])
-    mesh = roadway.ribbon_mesh(p, width=4.0, ground=bad_ground, lift=0.1)
-    assert all(v[2] == pytest.approx(0.1) for v in mesh.verts)
+    with pytest.raises(roadway.RoadwayError, match="terrain patch"):
+        roadway.ribbon_mesh(p, width=4.0, frame=frame, ground=outside)
+
+
+def test_partial_ground_coverage_survives_and_is_counted():
+    """One vertex off the tile should cost that vertex, not the whole lap."""
+    frame = SceneFrame(24.47, 54.60)
+
+    def patchy(lat, lon):
+        if lon > 54.6005:
+            raise ValueError("outside patch")
+        return 7.0
+
+    p = _path([(0.0, 0.0), (200.0, 0.0)])
+    mesh = roadway.ribbon_mesh(p, width=4.0, frame=frame, ground=patchy, lift=0.1)
+    assert mesh.metadata["ground_samples_missed"] > 0
+    assert all(v[2] == pytest.approx(7.1) for v in mesh.verts)
+
+
+# ── grading: a road follows the trend, not the noise ──────────────────────────
+
+def test_smoothing_flattens_dem_noise_but_keeps_real_relief():
+    """
+    A sawtooth of DEM noise on top of a genuine long hill.
+
+    Smoothing over a window much longer than the noise and much shorter than the
+    hill must remove the first and keep the second — that is the whole claim.
+    """
+    frame = SceneFrame(24.47, 54.60)
+    xy = [(t, 0.0) for t in range(0, 1001, 10)]
+    p = _path(xy)
+
+    def noisy(lat, lon):
+        x, _, _ = frame.to_scene(lat, lon)
+        hill = x * 0.02                      # a real 2% grade over 1 km
+        noise = 1.5 if int(round(x / 10)) % 2 else -1.5   # +/-1.5 m sawtooth
+        return hill + noise
+
+    rough = roadway.ribbon_mesh(p, width=6.0, frame=frame, ground=noisy)
+    smooth = roadway.ribbon_mesh(p, width=6.0, frame=frame, ground=noisy,
+                                 smooth_m=120.0)
+
+    assert rough.metadata["max_gradient_pct"] > 25.0     # noise dominates
+    assert smooth.metadata["max_gradient_pct"] < 5.0     # noise gone
+
+    # The real hill survives: ~20 m of rise across 1 km.
+    zs = [v[2] for v in smooth.verts]
+    assert max(zs) - min(zs) == pytest.approx(20.0, rel=0.15)
+
+
+def test_window_wider_than_the_route_levels_it():
+    frame = SceneFrame(24.47, 54.60)
+    xy = [(t, 0.0) for t in range(0, 501, 25)]
+    p = _path(xy)
+
+    def sloped(lat, lon):
+        x, _, _ = frame.to_scene(lat, lon)
+        return 4.0 + x * 0.01
+
+    mesh = roadway.ribbon_mesh(p, width=6.0, frame=frame, ground=sloped,
+                               smooth_m=10_000.0, lift=0.0)
+    zs = [v[2] for v in mesh.verts]
+    assert max(zs) - min(zs) == pytest.approx(0.0, abs=1e-9)
+    assert mesh.metadata["max_gradient_pct"] == pytest.approx(0.0, abs=1e-9)
+    # Levelled to the mean of the sampled profile, not to zero.
+    assert zs[0] == pytest.approx(4.0 + 0.01 * 250.0, rel=1e-6)
+
+
+def test_both_edges_share_one_elevation_per_cross_section():
+    """No random cross-track banking: left and right must sit at equal height."""
+    frame = SceneFrame(24.47, 54.60)
+    xy = [(t, 0.0) for t in range(0, 201, 10)]
+    p = _path(xy)
+
+    def bumpy(lat, lon):
+        _, y, _ = frame.to_scene(lat, lon)
+        return 3.0 + y  # varies purely across the ribbon's width
+
+    mesh = roadway.ribbon_mesh(p, width=20.0, frame=frame, ground=bumpy)
+    m = len(mesh.verts) // 2
+    for k in range(m):
+        assert mesh.verts[k][2] == pytest.approx(mesh.verts[m + k][2])
+
+
+def test_owners_map_cross_sections_to_spine_vertices():
+    left, right, owners = roadway.offset_ribbon(
+        [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0)], 6.0
+    )
+    assert len(owners) == len(left) == len(right)
+    assert owners == sorted(owners)          # emitted in spine order
+    assert set(owners) == {0, 1, 2}
 
 
 # ── parsing & stitching ────────────────────────────────────────────────────────

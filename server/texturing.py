@@ -393,6 +393,80 @@ def _build_graphs() -> dict:
         note="roofing membrane and paving; little hue variation, it is all bitumen",
     )
 
+    # The racing surface. Not `_masonry_graph`, because the masonry recipe puts
+    # a single grain frequency in both diffuse and bump, and on a surface this
+    # large that is exactly what reads as sandpaper: at 1:1 a circuit fills the
+    # frame, and one fine frequency tiling across 78,000 m2 has no larger
+    # structure for the eye to land on.
+    #
+    # So this is built at two scales. A coarse 6 m noise carries the paving
+    # lanes and repair patches — the thing actually visible from a helicopter
+    # shot — and a fine 0.18 m noise carries the aggregate, mixed in weakly and
+    # driving only a gentle bump. Relief is deliberately low (6.0 against
+    # concrete's 18.0): a race track is the flattest surface on the site and
+    # a strong bump under a 7 degree sun would texture it like gravel.
+    track = Graph("track_asphalt", materials.PRESETS["track_asphalt"],
+                  note="two-scale asphalt: 6 m paving patches over 0.18 m "
+                       "aggregate; low relief because a circuit is near-flat")
+    r, g, b = track.base.diffuse
+    track.add(TexNode("base", "VRayColor",
+                      params={"red": r / 255.0, "green": g / 255.0,
+                              "blue": b / 255.0}))
+    # Coarse structure: paving passes, patches, sun-bleached areas.
+    track.add(TexNode("patches", "Noise", params={"size": 6.0, "levels": 3.0}))
+    track.add(_triplanar("patches_world", "patches", 6.0))
+    track.add(TexNode("patchy", "Mix", params={"mixAmount": 0.22},
+                      inputs={"map1": "base", "map2": "patches_world"}))
+    # Fine structure: the aggregate itself, weak so it never dominates.
+    track.add(TexNode("aggregate", "Noise", params={"size": 0.18, "levels": 2.0}))
+    track.add(_triplanar("aggregate_world", "aggregate", 0.18))
+    track.add(TexNode("surfaced", "Mix", params={"mixAmount": 0.12},
+                      inputs={"map1": "patchy", "map2": "aggregate_world"}))
+    # Grime collects at the edges of the ribbon and against kerbs, not mid-track
+    # where the cars sweep it away; a wide dirt radius approximates that.
+    track.add(_dirt("weathered", "surfaced", 0.8))
+    track.bind("texmap_diffuse", "weathered")
+    track.add(TexNode("relief", "Noise", params={"size": 0.18,
+                                                 "bump_multiplier": 6.0}))
+    track.add(_triplanar("relief_world", "relief", 0.18))
+    track.bind("texmap_bump", "relief_world")
+    # Gloss break at the coarse scale: the racing line is polished, the
+    # off-line surface is not, and that contrast is the low-sun tell.
+    track.bind("texmap_reflectionGlossiness", "patches_world")
+    graphs["track_asphalt"] = track
+
+    # Grandstand seating. The tell is *row pitch*: a seating deck is a few
+    # thousand small units on a raked plane at a very regular ~0.8 m spacing,
+    # and that regularity is what the eye reads as seating rather than as a wall.
+    # So the dominant map is a Checker at seat pitch, not a noise — noise at any
+    # scale reads as dirty concrete, which is exactly the failure being fixed.
+    #
+    # A second, much coarser noise breaks up the block colour so that a 200 m
+    # stand is not one flat rectangle of blue, and the dirt pass darkens the
+    # gaps between tiers.
+    stand = Graph("grandstand", materials.PRESETS["grandstand"],
+                  note="seat-row banding at 0.8 m pitch; the regular spacing is "
+                       "what distinguishes seating from a blank facade")
+    r, g, b = stand.base.diffuse
+    stand.add(TexNode("base", "VRayColor",
+                      params={"red": r / 255.0, "green": g / 255.0,
+                              "blue": b / 255.0}))
+    stand.add(TexNode("rows", "Checker", params={"Soften": 0.15}))
+    stand.add(_triplanar("rows_world", "rows", 0.8))
+    stand.add(TexNode("banded", "Mix", params={"mixAmount": 0.30},
+                      inputs={"map1": "base", "map2": "rows_world"}))
+    stand.add(TexNode("blocks", "Noise", params={"size": 12.0, "levels": 2.0}))
+    stand.add(_triplanar("blocks_world", "blocks", 12.0))
+    stand.add(TexNode("varied", "Mix", params={"mixAmount": 0.14},
+                      inputs={"map1": "banded", "map2": "blocks_world"}))
+    stand.add(_dirt("weathered", "varied", 0.5))
+    stand.bind("texmap_diffuse", "weathered")
+    stand.add(TexNode("relief", "Checker",
+                      params={"Soften": 0.1, "bump_multiplier": 22.0}))
+    stand.add(_triplanar("relief_world", "relief", 0.8))
+    stand.bind("texmap_bump", "relief_world")
+    graphs["grandstand"] = stand
+
     # Wood. The obvious choice is the `Wood` map, and it is in the host's class
     # list — but it cannot be constructed on this build, so it is unusable.
     # `Marble` is the next best fit: its veining is directional and stretches

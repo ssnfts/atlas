@@ -97,6 +97,28 @@ PRESETS: dict[str, MaterialSpec] = {
     ),
     "roof_tile": MaterialSpec("atlas_roof_tile", (128, 68, 52), (16, 16, 16), 0.30, 1.5),
     "asphalt": MaterialSpec("atlas_asphalt", (52, 52, 55), (18, 18, 18), 0.25, 1.5),
+    "track_asphalt": MaterialSpec(
+        "atlas_track_asphalt", (41, 41, 44), (30, 30, 30), 0.62, 1.5,
+        note=(
+            "racing surface, not road paving. Darker and markedly smoother "
+            "than the `asphalt` preset: a circuit is laid in a fine-graded "
+            "wearing course and then polished along the racing line by the "
+            "cars themselves, so it holds a low-sun specular sheet that road "
+            "asphalt scatters away. That sheet is most of what makes a track "
+            "read as a track at grazing light."
+        ),
+    ),
+    "grandstand": MaterialSpec(
+        "atlas_grandstand", (74, 88, 112), (26, 26, 26), 0.40, 1.5,
+        note=(
+            "banked seating, not the structure holding it up. Reads as the "
+            "seats themselves — Yas Marina's are a desaturated blue — because "
+            "from any distance a grandstand *is* its seating deck: a raked "
+            "plane of thousands of small units whose colour is nothing like "
+            "the concrete frame beneath. Rendered as concrete they disappear "
+            "into the pit buildings around them."
+        ),
+    ),
     "ground": MaterialSpec(
         "atlas_ground", (118, 112, 98), (10, 10, 10), 0.20, 1.5,
         note=(
@@ -183,7 +205,22 @@ _TYPE_DEFAULTS = {
     "farm": "wood",
     "hut": "wood",
     "cabin": "wood",
+    "grandstand": "grandstand",
+    "stadium": "grandstand",
 }
+
+# Names that identify a building whose *type* tag is uninformative. At Yas
+# Marina three of the five grandstands carry `building=grandstand` and the other
+# two are plain `building=yes` — same structure, same seating, tagged by
+# different mappers. Matching the name recovers them.
+#
+# Deliberately narrow: only words that name a building typology, never a brand
+# or a place. "Marina Grandstand" matches on `grandstand`; "Yas Island Rotana"
+# matches nothing and stays a default.
+_NAME_HINTS = (
+    ("grandstand", "grandstand"),
+    ("tribune", "grandstand"),
+)
 
 
 def material_name_for(tags: dict) -> str:
@@ -210,6 +247,12 @@ def material_name_for(tags: dict) -> str:
     kind = str(tags.get("building") or "").strip().lower()
     if kind in _TYPE_DEFAULTS:
         return _TYPE_DEFAULTS[kind]
+
+    name = str(tags.get("name") or "").strip().lower()
+    if name:
+        for needle, preset in _NAME_HINTS:
+            if needle in name:
+                return preset
 
     return DEFAULT_MATERIAL
 

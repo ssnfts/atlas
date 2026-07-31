@@ -26,6 +26,17 @@ the arithmetic is pinned to invariants a self-consistent bug cannot satisfy:
   above, so its normal points +Z. That is a computed guarantee, not a hope that
   the OSM way happened to be digitised in a convenient direction.
 
+**A road is a graded surface, not a drape.** The elevation is sampled once per
+centre-line vertex and then low-passed along arc length by ``smooth_m``, because
+a machine laid this surface and it does not reproduce every bump in a terrain
+model. Draping Yas Marina straight onto Copernicus GLO-30 produced a **38.9%
+gradient** — twice Eau Rouge, on a flat reclaimed island — purely from DEM noise
+at 30 m posting being read across spine segments as short as 2 m. A window wider
+than the route levels it completely, which for a circuit built on reclaimed land
+is the physically right answer; the resulting height is still the DEM's own mean,
+not an invented number. ``max_gradient_pct`` and its raw counterpart both land in
+the mesh metadata so the choice is visible rather than implied.
+
 Dependency-free on purpose, exactly like :mod:`massing`, :mod:`solar` and
 :mod:`frame`. ``shapely`` would shorten the offsetting to one ``buffer`` call,
 but a buffer returns a *polygon* — it merges the two sides of a hairpin where
@@ -410,9 +421,13 @@ def offset_ribbon(
     tracks do, and a spike is exactly the silent, plausible-looking corruption
     this project exists to refuse.
 
-    Returns ``(left_row, right_row)``. Both have one entry per emitted
-    cross-section, and for a closed loop the rows are cyclic (no duplicate
-    closing vertex).
+    Returns ``(left_row, right_row, owners)``. The rows have one entry per
+    emitted cross-section and are cyclic for a closed loop (no duplicate closing
+    vertex). ``owners`` maps each cross-section back to the centre-line vertex
+    that produced it — a bevelled corner emits two cross-sections from one
+    vertex, so the mapping is not the identity, and callers that need a
+    per-vertex quantity (an elevation profile, a distance along the lap) cannot
+    reconstruct it without this.
     """
     pts = [tuple(p) for p in polyline]
     if closed and len(pts) >= 2 and _same(pts[0], pts[-1]):
@@ -438,6 +453,7 @@ def offset_ribbon(
 
     left: list[tuple[float, float]] = []
     right: list[tuple[float, float]] = []
+    owners: list[int] = []
 
     def incoming(i: int):
         return seg_normals[(i - 1) % n] if closed else (seg_normals[i - 1] if i > 0 else None)
@@ -468,6 +484,7 @@ def offset_ribbon(
                      (px + n_out[0] * half, py + n_out[1] * half)]
             right += [(px - n_in[0] * half, py - n_in[1] * half),
                       (px - n_out[0] * half, py - n_out[1] * half)]
+            owners += [i, i]
             continue
 
         mhx, mhy = mx / mlen, my / mlen
@@ -478,6 +495,7 @@ def offset_ribbon(
             ox, oy = mhx * half * scale, mhy * half * scale
             left.append((px + ox, py + oy))
             right.append((px - ox, py - oy))
+            owners.append(i)
         else:
             # Too sharp to mitre: bevel the corner with a point square to each
             # adjacent segment on both sides, keeping the rows the same length.
@@ -485,8 +503,9 @@ def offset_ribbon(
                      (px + n_out[0] * half, py + n_out[1] * half)]
             right += [(px - n_in[0] * half, py - n_in[1] * half),
                       (px - n_out[0] * half, py - n_out[1] * half)]
+            owners += [i, i]
 
-    return left, right
+    return left, right, owners
 
 
 def ribbon_mesh(
@@ -494,47 +513,91 @@ def ribbon_mesh(
     *,
     width: float,
     name: str = "roadway",
+    frame: SceneFrame | None = None,
     ground=None,
     lift: float = 0.05,
+    smooth_m: float = 0.0,
     mitre_limit: float = 4.0,
 ) -> Mesh:
     """
     Turn one :class:`Path` into a flat ribbon :class:`Mesh` in scene metres.
 
-    ``ground`` is an optional ``(x, y) -> elevation`` callable (a terrain patch's
-    ``elevation_at``); when given, every cross-section sits on the sampled ground
-    plus ``lift``. ``lift`` is a few centimetres so the surface rests *just* above
-    the terrain sheet rather than z-fighting it — coincident coplanar faces
-    flicker between the two materials pixel by pixel, which reads as a rendering
-    fault rather than a modelling one. Sampling outside the terrain patch falls
-    back to a flat ``lift`` for that vertex rather than raising, so a circuit that
-    runs a little past the DEM tile still lands whole.
+    ``ground`` is an optional elevation probe taking **geodetic** coordinates —
+    ``ground(lat, lon)``, the signature of :meth:`terrain.TerrainPatch.elevation_at`
+    and the one :func:`massing.ground_under` already uses. The ribbon's own
+    vertices are in scene metres, so ``frame`` is required alongside it to invert
+    them; passing ``ground`` without ``frame`` raises rather than guessing.
+
+    That combination is worth spelling out because getting it wrong is silent and
+    total. The first version of this function called ``ground(x, y)`` with scene
+    metres straight out of the offset rows. Every call raised — a scene easting
+    of -161 is not a latitude — a blanket ``except`` swallowed it, and the whole
+    5 km circuit came back pinned flat at ``lift`` while the terrain around it
+    ranged over 41 m. Nothing errored. The track was simply buried, and the
+    render came out as a city with no circuit in it. ``terrain.elevation_at``
+    refuses to guess for exactly this reason, and the old code overrode that
+    refusal from the outside.
+
+    So failures are counted now, not swallowed: a vertex outside the patch
+    inherits the last good height (a circuit may run a little past the DEM tile,
+    and one edge vertex should not sink the lap), but a ribbon where *nothing*
+    sampled raises :class:`RoadwayError`, and the miss count lands in
+    ``metadata``.
+
+    ``lift`` is a few centimetres so the surface rests *just* above the terrain
+    sheet rather than z-fighting it — coincident coplanar faces flicker between
+    the two materials pixel by pixel, which reads as a rendering fault rather
+    than a modelling one.
 
     Faces are wound counter-clockwise seen from above, so normals point +Z. The
     returned mesh carries its measured length, width and area in ``metadata`` for
     the caller (and the tests) to check against the world.
     """
-    left, right = offset_ribbon(
+    if ground is not None and frame is None:
+        raise RoadwayError(
+            "ribbon_mesh(ground=...) needs frame= as well: the probe takes "
+            "geodetic (lat, lon) but ribbon vertices are scene metres, so the "
+            "frame is what inverts them. Without it every sample would miss."
+        )
+    left, right, owners = offset_ribbon(
         path.xy, width, closed=path.closed, mitre_limit=mitre_limit
     )
     m = len(left)
     if m != len(right) or m < 2:
         raise RoadwayError(f"ribbon rows malformed: {len(left)} vs {len(right)}")
 
-    def z_at(x: float, y: float) -> float:
-        if ground is None:
+    spine = path.xy[:-1] if (path.closed and len(path.xy) >= 2
+                             and _same(path.xy[0], path.xy[-1])) else path.xy
+
+    # Elevation is sampled **once per centre-line vertex**, not once per edge
+    # vertex. Sampling the two edges independently lets a metre of DEM noise
+    # land on one side and not the other, which banks the surface at random —
+    # a road that rolls left and right every few metres for no reason.
+    profile, misses = _sample_profile(spine, frame, ground)
+
+    if ground is not None and profile is None:
+        raise RoadwayError(
+            f"no part of {name} falls inside the terrain patch, so its ground "
+            f"level is unknown ({misses} samples, all outside). Widen the "
+            "terrain radius rather than defaulting the surface to zero."
+        )
+
+    raw_grade = _max_gradient(spine, profile, path.closed) if profile else 0.0
+    if profile is not None and smooth_m > 0.0:
+        profile = _smooth_profile(spine, profile, smooth_m, path.closed)
+    graded = _max_gradient(spine, profile, path.closed) if profile else 0.0
+
+    def z_of(k: int) -> float:
+        if profile is None:
             return lift
-        try:
-            return float(ground(x, y)) + lift
-        except Exception:
-            return lift
+        return profile[owners[k]] + lift
 
     # Vertices: left row [0..m-1] then right row [m..2m-1].
     verts: list[tuple[float, float, float]] = []
-    for x, y in left:
-        verts.append((x, y, z_at(x, y)))
-    for x, y in right:
-        verts.append((x, y, z_at(x, y)))
+    for k, (x, y) in enumerate(left):
+        verts.append((x, y, z_of(k)))
+    for k, (x, y) in enumerate(right):
+        verts.append((x, y, z_of(k)))
 
     # Two triangles per quad. On a bend tighter than the half-width the *inner*
     # edge offsets past itself and folds one triangle back — its normal points
@@ -568,9 +631,118 @@ def ribbon_mesh(
             "surface_area_m2": round(_ribbon_area(left, right, path.closed), 2),
             "cross_sections": m,
             "faces_dropped_at_folds": dropped,
+            "ground_samples_missed": misses,
+            "smoothing_window_m": round(smooth_m, 1),
+            "max_gradient_pct": round(graded * 100.0, 2),
+            "max_gradient_pct_raw": round(raw_grade * 100.0, 2),
         }
     )
     return mesh
+
+
+def _sample_profile(spine, frame, ground):
+    """
+    Elevation at each centre-line vertex. Returns ``(profile, misses)``.
+
+    ``profile`` is None when ``ground`` is None (a flat ribbon) or when every
+    sample fell outside the patch — the caller distinguishes the two. A vertex
+    that misses inherits the previous good height, so a lap that strays a little
+    past the DEM tile keeps going; the count comes back so the caller can see it
+    happened rather than discovering it in a render.
+    """
+    if ground is None:
+        return None, 0
+
+    profile: list[float | None] = []
+    misses = 0
+    last_good: float | None = None
+    first_good: int | None = None
+
+    for x, y in spine:
+        lat, lon, _ = frame.to_geodetic(x, y)
+        try:
+            elevation = float(ground(lat, lon))
+        except Exception:
+            misses += 1
+            profile.append(last_good)  # None until the first success
+            continue
+        if first_good is None:
+            first_good = len(profile)
+        last_good = elevation
+        profile.append(elevation)
+
+    if first_good is None:
+        return None, misses
+
+    # Vertices before the first success have nothing to inherit forwards, so
+    # they take the first good height instead. Left as None they would be a
+    # silent hole; set to 0.0 they would read as sea level, which terrain.py
+    # refuses to do for exactly this reason.
+    head = profile[first_good]
+    return [head if z is None else z for z in profile], misses
+
+
+def _smooth_profile(spine, profile, window_m: float, closed: bool):
+    """
+    Low-pass the elevation profile along arc length.
+
+    A road is a *graded* surface: it follows the ground's trend, but a machine
+    laid it and it does not reproduce every bump in the terrain model. A DEM at
+    30 m posting carries noise of a metre or two, and draping a ribbon straight
+    onto it produced a 27% gradient on a circuit whose real maximum is nearer 3%
+    — steeper than Eau Rouge, on reclaimed flat land.
+
+    Averaging over a window of arc length removes that while preserving real
+    relief: a genuinely hilly circuit keeps its hills, because they are far
+    longer than the window. Wrapping is cyclic for a closed lap so the
+    start/finish line is not a step.
+    """
+    n = len(profile)
+    if n < 3 or window_m <= 0.0:
+        return profile
+
+    # Cumulative arc length at each vertex.
+    s = [0.0]
+    for i in range(n - 1):
+        s.append(s[-1] + math.hypot(spine[i + 1][0] - spine[i][0],
+                                    spine[i + 1][1] - spine[i][1]))
+    total = s[-1]
+    if closed and total > 0:
+        total += math.hypot(spine[0][0] - spine[-1][0],
+                            spine[0][1] - spine[-1][1])
+
+    half = window_m / 2.0
+    out: list[float] = []
+    for i in range(n):
+        acc = 0.0
+        count = 0
+        for j in range(n):
+            d = abs(s[j] - s[i])
+            if closed and total > 0:
+                d = min(d, total - d)
+            if d <= half:
+                acc += profile[j]
+                count += 1
+        out.append(acc / count if count else profile[i])
+    return out
+
+
+def _max_gradient(spine, profile, closed: bool) -> float:
+    """Steepest rise over run between adjacent centre-line vertices, as a
+    fraction. The physical sanity check on a draped surface: a road that comes
+    out at 27% is not a road."""
+    if not profile:
+        return 0.0
+    n = len(spine)
+    span = n if closed else n - 1
+    worst = 0.0
+    for i in range(span):
+        j = (i + 1) % n
+        run = math.hypot(spine[j][0] - spine[i][0], spine[j][1] - spine[i][1])
+        if run < EPS:
+            continue
+        worst = max(worst, abs(profile[j] - profile[i]) / run)
+    return worst
 
 
 def _faces_up(verts, tri) -> bool:
@@ -593,6 +765,7 @@ def centerlines_to_meshes(
     name_prefix: str = "roadway",
     ground=None,
     lift: float = 0.05,
+    smooth_m: float = 0.0,
 ) -> tuple[list[Mesh], list[dict]]:
     """
     Stitch, offset and mesh a set of ways into ribbon :class:`Mesh` objects.
@@ -613,8 +786,10 @@ def centerlines_to_meshes(
                     path,
                     width=width,
                     name=f"{name_prefix}_{safe}_{idx}",
+                    frame=frame,
                     ground=ground,
                     lift=lift,
+                    smooth_m=smooth_m,
                 )
             )
         except RoadwayError as exc:
