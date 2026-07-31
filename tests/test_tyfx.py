@@ -353,23 +353,37 @@ def test_contact_frame_for_crash_spec_is_integer():
 
 # ── generate_debris_script ────────────────────────────────────────────────────
 
-def test_generate_debris_script_contains_required_operators():
+def test_generate_debris_script_contains_verified_rigidbody_operators():
     script = tyfx.generate_debris_script(
-        "Atlas_Debris", ["car_03_body"],
+        "Atlas_Debris", ["car_03"],
         contact_frame=1680,
         car_speed_ms=55.0,
         yaw_rate_degs=152.9,
         site_z=5.27,
         end_frame=2400,
     )
-    for keyword in ("tyBirthInstant", "tyPositionObject", "tyShape",
-                    "tyPhysX", "Freeze"):
+    for keyword in (
+        '.addOperator "Birth" -1',
+        '.addOperator "Position Object" -1',
+        '.addOperator "Shape" -1',
+        '.addOperator "PhysX Shape" -1',
+        '.addOperator "PhysX Collision" -1',
+        '.addOperator "Mesh" -1',
+        "birth.birthMode = 0",
+        "birth.birthTotal = 30",
+        "shape.instancedGeo_tab[1] = wingNodes[1]",
+        "shape.meshSplitElements_tab[1] = true",
+        "collide.colliderList = #(groundPlane)",
+        "tf.reset_simulation()",
+    ):
         assert keyword in script, f"expected '{keyword}' in debris script"
+    for obsolete in ("tyBirthInstant", "tyPositionObject", "tyShape", "tyPhysX", "tf.Update()"):
+        assert obsolete not in script
 
 
 def test_generate_debris_script_starts_with_header():
     script = tyfx.generate_debris_script(
-        "Atlas_Debris", [],
+        "Atlas_Debris", ["car_03"],
         contact_frame=100,
         car_speed_ms=50.0,
         yaw_rate_degs=100.0,
@@ -377,6 +391,18 @@ def test_generate_debris_script_starts_with_header():
         end_frame=500,
     )
     assert script.startswith("-- Atlas generated MaxScript: Crash Debris")
+
+
+def test_generate_debris_script_requires_a_source_node():
+    with pytest.raises(ValueError, match="wing_nodes"):
+        tyfx.generate_debris_script(
+            "Atlas_Debris", [],
+            contact_frame=100,
+            car_speed_ms=50.0,
+            yaw_rate_degs=100.0,
+            site_z=0.0,
+            end_frame=500,
+        )
 
 
 def test_generate_debris_script_contact_frame_embedded():

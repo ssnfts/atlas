@@ -655,8 +655,9 @@ def atlas_crash_debris(
     is inside the 11_crash_wide and 12_crash_tight shot windows.
 
     Args:
-        wing_nodes: Names of the front-wing mesh nodes to fracture
-            (e.g. ["car_03_body"]). Front wing only — not the monocoque.
+        wing_nodes: Names of source car mesh nodes (e.g. ["car_01"]).
+            Atlas currently emits the mesh's disconnected components; it does
+            not yet perform a Voronoi fracture of the monocoque.
         spine_json: JSON array of [x, y] circuit spine pairs.
         execute: Run via bridge when True (requires ATLAS_ALLOW_MAXSCRIPT=1).
         end_frame: Last frame of the animation range.

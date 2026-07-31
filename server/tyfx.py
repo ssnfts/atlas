@@ -645,13 +645,17 @@ def generate_debris_script(
     """
     Return MaxScript that builds the crash-debris event graph.
 
-    Three events per the fx plan:
-    - Event 01: Birth burst at contact, Voronoi fragments from the front wing.
-    - Event 02: PhysX collision against the graded site plane.
-    - Event 03: Freeze after 6 s (debris stays on track, not deleted).
+    One event creates a finite burst of real car-mesh elements at impact,
+    gives them PhysX rigidbodies, then collides them against a wide site plane.
+    It deliberately does not claim to perform Voronoi fracturing: Atlas's car
+    proxy already contains discrete wings, plates, and body elements, which are
+    the valid shard source until a fracture operator is host-verified.
     """
+    if not wing_nodes:
+        raise ValueError("wing_nodes must contain at least one source mesh")
     node_refs = ", ".join(f'getNodeByName "{n}"' for n in wing_nodes)
-    inherit_v = round(car_speed_ms * 0.7, 2)
+    scatter_speed = round(min(16.0, max(6.0, car_speed_ms * 0.14)), 2)
+    ground_name = f"{flow_name}_Ground"
 
     header = _script_header("Crash Debris", {
         "flow": flow_name,
@@ -667,75 +671,69 @@ def generate_debris_script(
 (
 -- ── 1. tyFlow node ───────────────────────────────────────────────────────
 local tf = getNodeByName "{flow_name}"
-if tf == undefined then (
-    tf = tyFlow()
-    tf.name = "{flow_name}"
-)
+if tf != undefined do delete tf
+tf = tyFlow()
+tf.name = "{flow_name}"
 tf.pos = [0, 0, {site_z}]
 
--- ── 2. Event 01: Birth burst + Voronoi fragments ─────────────────────────
-local ev1 = tf.AddEvent()
-ev1.name = "Debris_Birth"
-
--- Birth: burst at contact, ~180 particles
-local opBirth = ev1.AddOperator "tyBirthInstant"
-opBirth.Amount = 180
-opBirth.Frame = {contact_frame}
-
--- Position: front wing faces only
+-- ── 2. Birth real source-mesh elements at the impact frame ────────────────
+local ev1 = tf.addEvent()
+ev1.setName "Debris_Birth"
 local wingNodes = #({node_refs})
-local opPos = ev1.AddOperator "tyPositionObject"
-opPos.EmitterNodes = wingNodes
-opPos.PickSurface = true
+local birth = ev1.addOperator "Birth" -1
+birth.setName "Impact burst"
+birth.birthMode = 0
+birth.BirthStart = {contact_frame}
+birth.birthEndEnable = true
+birth.BirthEnd = {contact_frame}
+birth.birthTotal = 30
 
--- Shape: Voronoi fracture of the front wing
-local opShape = ev1.AddOperator "tyShape"
-opShape.Mode = 3  -- mesh from node
-opShape.MeshNodes = wingNodes
+local position = ev1.addOperator "Position Object" -1
+position.setName "Source mesh surface"
+position.objectList = wingNodes
 
--- Velocity: inherit 0.7 of car speed + 6 m/s radial scatter
-local opVel = ev1.AddOperator "tySpeed"
-opVel.Speed = 6.0
-opVel.SpeedVariation = 2.0
-opVel.InheritVelocity = {inherit_v / max(car_speed_ms, 1.0):.4f}
-opVel.DirectionMode = 4  -- random spherical scatter
+local shape = ev1.addOperator "Shape" -1
+shape.instancedGeo_tab[1] = wingNodes[1]
+shape.meshSplitElements_tab[1] = true
 
--- ── 3. Event 02: PhysX collision ─────────────────────────────────────────
-local ev2 = tf.AddEvent()
-ev2.name = "Debris_PhysX"
+local physics = ev1.addOperator "PhysX Shape" -1
+physics.hullMode = 2
+physics.restitution = 0.12
+physics.staticFriction = 0.78
+physics.dynamicFriction = 0.72
+physics.massOverride = true
+physics.mass = 0.2
+physics.linearDamping = 0.2
 
-local opPhys = ev2.AddOperator "tyPhysX"
-opPhys.ConvexDecompose = true
-opPhys.Restitution = 0.12  -- low bounce, carbon on asphalt
-opPhys.Friction = 0.78     -- high friction
-opPhys.AngularVelocity = {round(yaw_rate_degs * 0.017, 4)}  -- from impact yaw rate
-
--- Collision surface: the graded site plane at z={site_z}
-local groundPlane = Plane()
-groundPlane.name = "Atlas_Ground_Collider"
+local oldGround = getNodeByName "{ground_name}"
+if oldGround != undefined do delete oldGround
+local groundPlane = Plane width:10000 length:10000
+groundPlane.name = "{ground_name}"
 groundPlane.pos = [0, 0, {site_z}]
-groundPlane.width = 10000
-groundPlane.length = 10000
-local opColl = ev2.AddOperator "tyPhysXCollisionShape"
-opColl.StaticMeshNodes = #(groundPlane)
+groundPlane.isHidden = true
 
--- ── 4. Event 03: Freeze after 6 s (debris stays on track) ────────────────
-local ev3 = tf.AddEvent()
-ev3.name = "Debris_Freeze"
+local collide = ev1.addOperator "PhysX Collision" -1
+collide.colliderList = #(groundPlane)
+collide.hullMode = 2
 
-local opFreeze = ev3.AddOperator "tyPhysX"
-opFreeze.Freeze = true
+local speed = ev1.addOperator "Speed" -1
+speed.setName "Impact scatter"
+speed.magnitude = {scatter_speed}
+speed.magnitudeVariation = 2.0
 
--- Age test wires ev2 -> ev3
-local opAge = ev2.AddTest "tyTestAge"
-opAge.MaxAge = 6.0
+local force = ev1.addOperator "Force" -1
+force.setName "Gravity"
+force.gravityStrength = -1
 
--- ── 5. Wire events and update ────────────────────────────────────────────
-tf.Update()
+local mesh = ev1.addOperator "Mesh" -1
+mesh.setName "Render mesh"
+
+-- ── 3. Reset the solver after graph construction ──────────────────────────
+tf.reset_simulation()
 
 print ("Atlas: crash debris event graph built on " + tf.name)
 print ("  Contact frame: {contact_frame}")
-print ("  Wing nodes: {len(wing_nodes)}")
+print ("  Source mesh nodes: {len(wing_nodes)}")
 )
 """
     return script
@@ -792,10 +790,9 @@ def write_debris_script(
         "path": str(out),
         "lines": len(script.splitlines()),
         "summary": (
-            f"Crash debris: {len(wing_nodes)} wing node(s), "
+            f"Crash debris: {len(wing_nodes)} source mesh node(s), "
             f"contact frame {cf}, "
             f"car speed {crash_speed:.1f} m/s ({crash_speed * 3.6:.0f} km/h), "
-            f"yaw rate {yaw_rate:.0f} deg/s, "
             f"site z {site_z}."
         ),
         "params": {
