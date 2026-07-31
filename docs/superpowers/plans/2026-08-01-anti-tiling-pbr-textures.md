@@ -127,9 +127,9 @@ saves material milestones.
   .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider --basetemp out\pytest-antitile-full
   ```
 
-- [ ] Inspect both normal and cached diffs. Stage only the source, tests and
+- [x] Inspect both normal and cached diffs. Stage only the source, tests and
   two anti-tiling documents; do not stage Claude's `Houdina/` work or unrelated
   untracked files.
-- [ ] Commit and push only after the full suite passes. Report that structural
+- [x] Commit and push only after the full suite passes (`23074fe`). Report that structural
   anti-tiling acceptance passed, and explicitly state that no render was made
   at the user's request.
