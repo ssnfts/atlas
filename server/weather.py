@@ -401,19 +401,106 @@ def _clouds_from(obs: Observation) -> tuple[dict, str]:
         "cloud_variety": round(0.3 + 0.4 * (1.0 - abs(total - 50.0) / 50.0), 3),
         "cirrus_amount": round(min(high / 100.0, 1.0), 3),
     }
+
+    # Cloud base, from the lifting condensation level. Espy's approximation puts
+    # it at roughly 125 m for every degree of spread between the air temperature
+    # and the dew point — the height a parcel has to rise before it saturates,
+    # which is physically what a cloud base *is*.
+    #
+    # Worth deriving rather than defaulting: V-Ray ships 1000 m, and cloud base
+    # is the single number that decides whether a deck reads as low grey weather
+    # or as high summer cumulus. On a humid coast it can be 300 m; over a desert
+    # in the afternoon it can be 3 km, and the same density looks like a
+    # different day at each.
+    base = _cloud_base_m(obs)
+    if base is not None:
+        params["height"] = round(base, 1)
+
+    # Depth of the deck. Thin where there is little cloud, deeper as cover
+    # grows; capped because this is a fair-weather approximation and not a
+    # convective model — a real cumulonimbus is 10 km deep and nothing in an
+    # hourly cover fraction would tell us we were looking at one.
+    params["thickness"] = round(200.0 + 8.0 * min(low_mid, 100.0), 1)
+
     why = (
         f"total cover {total:.0f}% (low/mid {low_mid:.0f}%, high {high:.0f}%) "
         f"-> density {params['cloud_density']}, cirrus {params['cirrus_amount']}"
     )
+    if base is not None:
+        why += (
+            f"; base {params['height']:.0f} m from LCL "
+            f"(T {obs.temperature_c:.1f}C, dew point {obs.dew_point_c:.1f}C)"
+        )
     return params, why
 
 
-def sky_from_weather(obs: Observation, *, ground_albedo: float | None = None) -> SkySettings:
+def _scale_clouds(params: dict, why: str, scale: float) -> tuple[dict, str]:
+    """
+    Scale the derived cloud amounts, and say loudly that this is not the weather.
+
+    Only the *amount* parameters move. Cloud base stays where the thermodynamics
+    put it, because the height of the condensation level is not an artistic
+    decision — a deck at 1075 m with twice the cover is a plausible sky, and the
+    same deck moved to 300 m is a different climate.
+    """
+    scaled = dict(params)
+    if scale > 0.0:
+        scaled["clouds_on"] = True
+    for key, cap in (("cloud_density", 1.0), ("cirrus_amount", 1.0),
+                     ("cloud_variety", 1.0), ("clouds_density_multiplier", 3.0)):
+        if key in scaled:
+            scaled[key] = round(min(scaled[key] * scale, cap), 3)
+    if "thickness" in scaled:
+        scaled["thickness"] = round(min(scaled["thickness"] * scale, 4000.0), 1)
+
+    return scaled, (
+        f"{why}; SCALED x{scale:g} for the shot — this sky no longer matches "
+        "the observation and must not be described as the recorded weather"
+    )
+
+
+def _cloud_base_m(obs: Observation) -> float | None:
+    """
+    Height of the cloud base in metres, from the temperature/dew-point spread.
+
+    Espy's approximation: 125 m per degree Celsius of spread. Crude next to a
+    real sounding, and far better than a constant — it is the standard field
+    estimate for exactly this, and both inputs are already in the observation.
+
+    Returns None when either input is missing, so the caller leaves V-Ray's own
+    default alone rather than substituting a fabricated altitude.
+    """
+    if obs.temperature_c is None or obs.dew_point_c is None:
+        return None
+    spread = obs.temperature_c - obs.dew_point_c
+    if spread < 0.0:
+        # Saturated at the surface: fog, not a cloud deck with a base above it.
+        return 0.0
+    return max(50.0, min(125.0 * spread, 6000.0))
+
+
+def sky_from_weather(
+    obs: Observation,
+    *,
+    ground_albedo: float | None = None,
+    cloud_scale: float = 1.0,
+) -> SkySettings:
     """
     Derive V-Ray sun/sky parameters from an observation.
 
     Returns values rather than applying them, so they can be inspected, logged
     and overridden. Every key is a verified V-Ray 7 parameter name.
+
+    ``cloud_scale`` multiplies the derived cloud amounts. It defaults to 1.0 —
+    the sky the instruments recorded — and exists because "put some clouds in
+    it" is a legitimate request that the weather sometimes refuses: the Yas
+    Marina reference hour was 9% cover, which is a correct and almost empty sky.
+
+    Anything other than 1.0 is a **deviation from the observation**, and is
+    recorded as one in :attr:`SkySettings.rationale` and flagged by
+    :attr:`SkySettings.matches_observation`. A scene can be lit for the weather
+    that happened or for the weather someone wanted, and the file should say
+    which — that is the difference between a reconstruction and a picture.
     """
     params: dict = {}
     rationale: dict = {}
@@ -427,6 +514,8 @@ def sky_from_weather(obs: Observation, *, ground_albedo: float | None = None) ->
     rationale["water_vapour"] = why
 
     cloud_params, why = _clouds_from(obs)
+    if cloud_scale != 1.0:
+        cloud_params, why = _scale_clouds(cloud_params, why, cloud_scale)
     params.update(cloud_params)
     rationale["clouds"] = why
 

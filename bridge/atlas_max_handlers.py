@@ -574,6 +574,62 @@ def cmd_create_mesh(params: dict) -> dict:
     }
 
 
+def cmd_vray_hdri_env(params: dict) -> dict:
+    """
+    Put a VRayHDRI in the environment slot, rotated to a given bearing.
+
+    Atomic host-side for the same reason as the sky: a texmap has no name or
+    handle, so it cannot be handed back to the client and referenced later.
+
+    ``horizontal_rotation`` is what makes an HDRI usable in a georeferenced
+    scene. A captured sky has a sun baked into it at whatever bearing the
+    photographer was standing, and dropping it in unrotated puts that sun
+    somewhere unrelated to the one this project computed — two suns, in two
+    directions, one of them fictional. Rotating the map so its own sun lands on
+    the computed azimuth is what reconciles them.
+
+    Everything is read back, because ``environmentMap`` accepts an assignment
+    whether or not ``useEnvironmentMap`` is on, and a scene lit by the default
+    grey with a perfectly good HDRI sitting unused in the slot looks like a bad
+    HDRI rather than an unticked box.
+    """
+    path = str(params.get("path") or "")
+    if not path or not os.path.isfile(path):
+        raise ValueError(f"HDRI not found on the host: {path!r}")
+
+    tex = rt.VRayHDRI()
+    applied: dict = {}
+    rejected: dict = {}
+
+    wanted = {
+        "HDRIMapName": path,
+        "maptype": int(params.get("maptype", 2)),   # 2 = spherical
+        "horizontalRotation": float(params.get("horizontal_rotation", 0.0)),
+        "multiplier": float(params.get("multiplier", 1.0)),
+    }
+    for key, value in wanted.items():
+        if not hasattr(tex, key):
+            rejected[key] = "VRayHDRI has no such parameter on this build"
+            continue
+        try:
+            setattr(tex, key, value)
+            applied[key] = getattr(tex, key)
+        except Exception as exc:
+            rejected[key] = f"{type(exc).__name__}: {exc}"
+
+    rt.environmentMap = tex
+    rt.useEnvironmentMap = True
+
+    return {
+        "applied": applied,
+        "rejected": rejected,
+        # Read back from the scene, not echoed from the request.
+        "environment_map_class": str(rt.classOf(rt.environmentMap)),
+        "use_environment_map": bool(rt.useEnvironmentMap),
+        "map_name_on_host": str(getattr(rt.environmentMap, "HDRIMapName", "")),
+    }
+
+
 def cmd_build_material(params: dict) -> dict:
     """
     Build a procedural texmap graph and assign the material to nodes.
@@ -888,6 +944,7 @@ HANDLERS = {
     "properties": cmd_properties,
     "scene_list": cmd_scene_list,
     "vray_sky_setup": cmd_vray_sky_setup,
+    "vray_hdri_env": cmd_vray_hdri_env,
     "assign_material": cmd_assign_material,
     "create_mesh": cmd_create_mesh,
     "build_material": cmd_build_material,

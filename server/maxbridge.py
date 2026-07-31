@@ -193,6 +193,34 @@ class MaxBridge:
             timeout=timeout,
         )
 
+    def vray_hdri_env(
+        self,
+        path: str,
+        *,
+        horizontal_rotation: float = 0.0,
+        multiplier: float = 1.0,
+        maptype: int = 2,
+        timeout: float = 120.0,
+    ) -> dict:
+        """
+        Put an HDRI in the environment slot, rotated to a bearing.
+
+        Atomic host-side: a texmap has no name or handle to round-trip. Check
+        ``use_environment_map`` in the reply — assigning the map and enabling it
+        are separate operations in Max, and a scene with a perfectly good HDRI
+        sitting in an unticked slot renders on the default grey.
+        """
+        return self._send(
+            {
+                "command": "vray_hdri_env",
+                "path": path,
+                "horizontal_rotation": horizontal_rotation,
+                "multiplier": multiplier,
+                "maptype": maptype,
+            },
+            timeout=timeout,
+        )
+
     def maxscript(self, code: str, timeout: float = 120.0) -> Any:
         """Evaluate raw MaxScript. Disabled unless ATLAS_ALLOW_MAXSCRIPT=1 in Max."""
         return self._send({"command": "maxscript", "code": code}, timeout=timeout)
