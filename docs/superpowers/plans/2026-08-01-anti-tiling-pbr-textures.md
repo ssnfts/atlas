@@ -41,7 +41,7 @@ saves material milestones.
 - Modify: `tests/test_texturing.py`
 - Modify: `server/texturing.py`
 
-- [ ] Add a failing test for `anti_tiling_scanned_graph` that supplies two
+- [x] Add a failing test for `anti_tiling_scanned_graph` that supplies two
   minimal PBR texture-set dictionaries and asserts:
   - primary and secondary image tri-planars feed the final diffuse blend;
   - their scale ratio is 1.618;
@@ -49,20 +49,21 @@ saves material milestones.
   - the secondary source has a non-zero offset and rotation;
   - an independently projected macro mask feeds the confirmed `Mix.Mask` slot;
   - asphalt omits a bump output.
-- [ ] Run the red test:
+- [x] Run the red test (initially failed at import because the builder did not
+  exist):
 
   ```powershell
   .\.venv\Scripts\python.exe -m pytest tests/test_texturing.py -q -p no:cacheprovider --basetemp out\pytest-antitile-red
   ```
 
-- [ ] Implement the smallest pure-data graph builder. Keep source maps,
+- [x] Implement the smallest pure-data graph builder. Keep source maps,
   tri-planars, macro noise/mask, colour blend, roughness blend/inversion, and
   optional normal blend as explicitly named graph nodes. Use a fixed `1.618`
   secondary scale ratio only when the caller has not provided an explicit
   secondary scale.
-- [ ] Add a second test showing building normals can be enabled while asphalt
+- [x] Add a second test showing building normals can be enabled while asphalt
   deliberately omits the bump channel.
-- [ ] Run focused green verification:
+- [x] Run focused green verification: 40 passed.
 
   ```powershell
   .\.venv\Scripts\python.exe -m pytest tests/test_texturing.py -q -p no:cacheprovider --basetemp out\pytest-antitile-green
@@ -74,19 +75,19 @@ saves material milestones.
 - Create: `demo_yas_pbr_textures.py`
 - Modify: relevant unit tests only if pure filtering helpers are extracted
 
-- [ ] Create a source-driven updater with no geometry/OSM rebuild path. Fetch
+- [x] Create a source-driven updater with no geometry/OSM rebuild path. Fetch
   only `asphalt_track` and `concrete_slab_wall_02` in 4K with maps
   `Diffuse`, `Rough`, `nor_gl`; require the existing `asphalt_02` and
   `concrete_layers_02` local CC0 sets.
-- [ ] Construct a track graph at 2.0 m / 3.236 m image scales and a 37 m macro
+- [x] Construct a track graph at 2.0 m / 3.236 m image scales and a 37 m macro
   mask. Set normal strength to zero so no low-sun corrugation is introduced.
-- [ ] Construct a building graph at 2.1 m / 3.3978 m image scales and a 19 m
+- [x] Construct a building graph at 2.1 m / 3.3978 m image scales and a 19 m
   macro mask. Enable bounded normal detail through `VRayNormalMap`.
-- [ ] Use current host node inventory to assign the track graph only to the
+- [x] Use current host node inventory to assign the track graph only to the
   three track-asphalt nodes and the building graph only to ordinary `osm_`
   buildings. Exclude the six supported grandstand/stadium nodes and all
   kerbs, paint lines, tyres, rims and car bodies.
-- [ ] After each bridge build, reject an empty target list, a missing texture
+- [x] After each bridge build, reject an empty target list, a missing texture
   map, or any non-empty `rejected` response. Save explicit scene checkpoints
   after track, building and car-material verification using
   `MaxBridge.save_scene`.
@@ -98,16 +99,16 @@ saves material milestones.
 - No source change expected: `server/maxbridge.py`,
   `bridge/atlas_max_handlers.py`
 
-- [ ] First construct the track graph on a single temporary/target material
+- [x] First construct the track graph on a temporary material without assignment
   through the bridge. Confirm every randomisation property,
   `frame_offset`, `texture_rotation`, and `Mix.Mask` is accepted. Stop if the
   host rejects anything rather than silently falling back.
-- [ ] Apply track graph to three track nodes, confirm the material count is
+- [x] Apply track graph to three track nodes, confirm the material count is
   three, and save `out/yas_race_pbr_track.max`.
-- [ ] Apply building graph to 373 ordinary building nodes, confirm six
+- [x] Apply building graph to 373 ordinary building nodes, confirm six
   grandstand/stadium nodes remain on their existing materials, and save
   `out/yas_race_pbr_buildings.max`.
-- [ ] Query every generic car material. Confirm each retains the
+- [x] Query every generic car material. Confirm each retains the
   host-verified clearcoat values (`coat_amount=0.80`,
   `coat_glossiness=0.96`, `coat_ior=1.52`) and that no bitmap material was
   assigned. Save `out/yas_race_hyperreal_pbr.max`.
@@ -118,9 +119,9 @@ saves material milestones.
 - Modify: `docs/superpowers/specs/2026-08-01-anti-tiling-pbr-design.md`
 - Modify: `docs/superpowers/plans/2026-08-01-anti-tiling-pbr-textures.md`
 
-- [ ] Mark checked implementation items in this plan and record the actual
+- [x] Mark checked implementation items in this plan and record the actual
   host rejection/count/save evidence in the design document.
-- [ ] Run the complete suite:
+- [x] Run the complete suite: 993 passed.
 
   ```powershell
   .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider --basetemp out\pytest-antitile-full
@@ -132,4 +133,3 @@ saves material milestones.
 - [ ] Commit and push only after the full suite passes. Report that structural
   anti-tiling acceptance passed, and explicitly state that no render was made
   at the user's request.
-

@@ -34,11 +34,23 @@ from texturing import (  # noqa: E402
     Graph,
     TexNode,
     TexturingError,
+    anti_tiling_scanned_graph,
     graph_for_building,
     validate_graph,
 )
 
 RING = [(25.0, 55.0), (25.0, 55.001), (25.001, 55.001), (25.001, 55.0)]
+
+_PRIMARY_PBR = {
+    "Diffuse": "C:/textures/primary_diffuse.jpg",
+    "Rough": "C:/textures/primary_rough.jpg",
+    "nor_gl": "C:/textures/primary_nor_gl.jpg",
+}
+_SECONDARY_PBR = {
+    "Diffuse": "C:/textures/secondary_diffuse.jpg",
+    "Rough": "C:/textures/secondary_rough.jpg",
+    "nor_gl": "C:/textures/secondary_nor_gl.jpg",
+}
 
 
 # ── Names must have been discovered, not recalled ─────────────────────────────
@@ -144,6 +156,61 @@ def test_on_flags_cannot_be_separated_from_the_map():
     assert graph.slot_writes() == {
         "texmap_bump": {"__node_ref__": "n"}, "texmap_bump_on": True
     }
+
+
+# -- Anti-tiling scanned PBR ---------------------------------------------------
+
+def test_anti_tiling_scanned_graph_uses_staggered_world_sources_and_macro_mask():
+    """
+    A single world-space bitmap is still visibly periodic. The final material
+    must combine two non-commensurate image samplers using a third, independent
+    macro field; otherwise a clean circuit becomes a tiled floor.
+    """
+    graph = anti_tiling_scanned_graph(
+        "test_track",
+        materials.PRESETS["track_asphalt"],
+        _PRIMARY_PBR,
+        _SECONDARY_PBR,
+        primary_size_m=2.0,
+        macro_size_m=37.0,
+        normal_multiplier=0.0,
+    )
+
+    primary = graph.nodes["primary_albedo_tri"]
+    secondary = graph.nodes["secondary_albedo_tri"]
+    assert primary.cls == secondary.cls == "VRayTriplanarTex"
+    assert secondary.params["size"] / primary.params["size"] == pytest.approx(1.618)
+    for node in (primary, secondary):
+        assert node.params["random_texture_offset"] is True
+        assert node.params["random_texture_rotation"] is True
+    assert secondary.params["frame_offset"] == {"__point3__": [17.0, 31.0, 11.0]}
+    assert secondary.params["texture_rotation"] == {"__point3__": [0.0, 0.0, 31.0]}
+
+    macro = graph.nodes["macro_world"]
+    assert macro.cls == "VRayTriplanarTex"
+    assert macro.params["size"] == 37.0
+    assert graph.nodes["albedo_mix"].inputs["Mask"] == "macro_world"
+    assert graph.nodes["rough_mix"].inputs["Mask"] == "macro_world"
+    assert "texmap_bump" not in graph.channels
+    assert validate_graph(graph) == []
+
+
+def test_anti_tiling_scanned_graph_can_keep_building_normal_detail():
+    graph = anti_tiling_scanned_graph(
+        "test_building",
+        materials.PRESETS["concrete"],
+        _PRIMARY_PBR,
+        _SECONDARY_PBR,
+        primary_size_m=2.1,
+        macro_size_m=19.0,
+        normal_multiplier=0.35,
+    )
+
+    assert graph.nodes["normal"].cls == "VRayNormalMap"
+    assert graph.nodes["normal"].params["normal_map_multiplier"] == 0.35
+    assert graph.channels["texmap_bump"] == "normal"
+    assert graph.nodes["normal_mix"].inputs["Mask"] == "macro_world"
+    assert validate_graph(graph) == []
 
 
 # ── Graph structure ───────────────────────────────────────────────────────────

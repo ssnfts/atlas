@@ -83,3 +83,23 @@ This is sufficient to rule out a single repeated bitmap setup. A final
 frame-level assessment of artistic realism still requires a future viewport or
 render review, which is intentionally deferred rather than faked.
 
+## Implementation evidence (2026-08-01)
+
+- `tests/test_texturing.py`: 40 focused tests passed. They assert the required
+  dual 2.0/3.236 m and 2.1/3.3978 m image projections, `1.618` scale ratio,
+  random phase flags, non-zero secondary offset/rotation, independent macro
+  masks, and the deliberately bump-free asphalt channel.
+- Both approved 4K CC0 sets were fetched with exactly `Diffuse`, `Rough` and
+  `nor_gl` maps: Poly Haven `asphalt_track` and `concrete_slab_wall_02`.
+- Live V-Ray construction: the unassigned track probe built 14/14 texmaps with
+  `rejected={}`. The applied track graph built 14/14 maps on 3 nodes; the
+  building graph built 20/20 maps on 373 nodes, again with `rejected={}`.
+- Assignment audit: `atlas_track_asphalt_antitile` is on exactly 3 nodes,
+  `atlas_concrete_antitile` is on exactly 373 nodes, and none of the six
+  protected grandstand/stadium nodes was overwritten.
+- Car audit: all 20 body meshes retain `coat_amount=0.80`,
+  `coat_glossiness=0.96`, `coat_ior=1.52`, with zero diffuse bitmap maps.
+- Verified scene checkpoints: `out/yas_race_pbr_track.max`,
+  `out/yas_race_pbr_buildings.max`, and `out/yas_race_hyperreal_pbr.max`.
+
+No render or viewport capture was made, at the user's direction.

@@ -45,6 +45,7 @@ __all__ = [
     "TEXMAP_CLASSES",
     "TEXMAP_SLOTS",
     "CHANNELS",
+    "anti_tiling_scanned_graph",
     "graph_for_building",
     "validate_graph",
     "TexturingError",
@@ -73,9 +74,13 @@ TEXMAP_CLASSES = frozenset({
     "Raytrace", "Checker", "Marble", "Dent", "Mask", "RGB_Tint", "Mix", "Noise",
     "Bitmaptexture", "Reflect_Refract", "Flat_Mirror", "Gradient",
     "CompositeTexturemap", "RGB_Multiply", "Falloff", "output",
-    "Color_Correction", "MultiTile", "Cellular", "Speckle", "Smoke",
+    # `ColorCorrection` is the constructible MaxScript alias used by the
+    # roughness inversion graph; `Color_Correction` is also reported by the
+    # native class manifest.
+    "Color_Correction", "ColorCorrection", "MultiTile", "Cellular", "Speckle", "Smoke",
     # V-Ray
     "VRayDirt", "VRayTriplanarTex", "VRayNoiseTex", "VRayBitmap", "VRayColor",
+    "VRayNormalMap",
     "VRayCompTex", "VRayEdgesTex", "VRayDistanceTex", "VRayMultiSubTex",
 })
 
@@ -269,7 +274,9 @@ def _cycle_problems(graph: Graph) -> list[str]:
 
 # ── Graph construction ────────────────────────────────────────────────────────
 
-def _triplanar(node_id: str, source: str, size_m: float) -> TexNode:
+def _triplanar(node_id: str, source: str, size_m: float, *,
+               randomize: bool = False, frame_offset=None,
+               texture_rotation=None) -> TexNode:
     """
     World-space projection at a physical size.
 
@@ -281,8 +288,20 @@ def _triplanar(node_id: str, source: str, size_m: float) -> TexNode:
     # Parameter names discovered from a live VRayTriplanarTex: the size is
     # `size` and the input is `texture`. `texture_size`/`texmap` read as correct
     # and are both rejected by the host.
-    return TexNode(node_id, "VRayTriplanarTex",
-                   params={"size": size_m}, inputs={"texture": source})
+    params = {"size": size_m}
+    if randomize:
+        # These names and their behaviour were read from the live V-Ray 7
+        # `VRayTriplanarTex` instance. They are not guessed MaxScript fields.
+        params.update({
+            "random_texture_offset": True,
+            "random_texture_rotation": True,
+        })
+    if frame_offset is not None:
+        params["frame_offset"] = {"__point3__": list(frame_offset)}
+    if texture_rotation is not None:
+        params["texture_rotation"] = {"__point3__": list(texture_rotation)}
+    return TexNode(node_id, "VRayTriplanarTex", params=params,
+                   inputs={"texture": source})
 
 
 def _dirt(node_id: str, source: str, radius_m: float) -> TexNode:
@@ -428,6 +447,150 @@ def scanned_graph(key: str, spec, texture_set: dict, *, size_m: float,
                           params={"normal_map_on": True,
                                   "normal_map_multiplier": 1.0},
                           inputs={"normal_map": "normal_tri"}))
+        graph.bind("texmap_bump", "normal")
+
+    return graph
+
+
+def anti_tiling_scanned_graph(
+    key: str,
+    spec,
+    primary_set: dict,
+    secondary_set: dict,
+    *,
+    primary_size_m: float,
+    macro_size_m: float,
+    normal_multiplier: float = 1.0,
+    secondary_size_m: float | None = None,
+    note: str = "",
+) -> Graph:
+    """Build a scanned PBR graph which cannot reduce to one tiled bitmap.
+
+    A conventional triplanar projection fixes UV stretching but still repeats
+    at a predictable world interval. This graph pairs two independently phased
+    scanned sources at incommensurate scales, then chooses between them with a
+    third, much larger triplanar noise field. The rule is deliberately encoded
+    in a reusable graph rather than left to a one-off scene script: callers
+    cannot accidentally return to the tempting one-bitmap setup.
+
+    ``secondary_size_m`` defaults to ``primary_size_m * 1.618``. The ratio is
+    intentionally not a convenient integer multiple; common repeating periods
+    are pushed far outside a camera-visible facade or track section. Both image
+    projections additionally request V-Ray's host-confirmed per-object random
+    offset and rotation. ``frame_offset`` and ``texture_rotation`` are
+    ``Point3`` values at bridge construction time, not Python lists.
+
+    Asphalt callers pass ``normal_multiplier=0``. A real circuit's wearing
+    course has millimetric relief, and a shaded normal/bump pass produced false
+    corrugation in the project's low-sun test. Its material variation therefore
+    comes from photographed albedo and roughness only.
+    """
+    if primary_size_m <= 0 or macro_size_m <= 0:
+        raise TexturingError("anti-tiling texture scales must be positive")
+    if normal_multiplier < 0:
+        raise TexturingError("normal_multiplier cannot be negative")
+
+    secondary_size_m = (
+        primary_size_m * 1.618 if secondary_size_m is None else secondary_size_m
+    )
+    if secondary_size_m <= 0:
+        raise TexturingError("secondary anti-tiling texture scale must be positive")
+
+    required = ("Diffuse", "Rough")
+    missing = [
+        f"{label}:{name}"
+        for label, texture_set in (("primary", primary_set), ("secondary", secondary_set))
+        for name in required
+        if not texture_set.get(name)
+    ]
+    if normal_multiplier:
+        missing += [
+            f"{label}:nor_gl"
+            for label, texture_set in (("primary", primary_set), ("secondary", secondary_set))
+            if not texture_set.get("nor_gl")
+        ]
+    if missing:
+        raise TexturingError(
+            "anti-tiling PBR graph needs both scanned sources: " + ", ".join(missing)
+        )
+
+    graph = Graph(
+        key,
+        spec,
+        note=note or (
+            f"anti-tiling scanned PBR: {primary_size_m:g}m / "
+            f"{secondary_size_m:g}m, {macro_size_m:g}m macro breakup"
+        ),
+    )
+
+    def image_pair(node_prefix: str, source_key: str, *, data: bool = False) -> tuple[str, str]:
+        bitmap_params = {"color_space": 0} if data else {}
+        primary_map = f"primary_{node_prefix}_map"
+        secondary_map = f"secondary_{node_prefix}_map"
+        primary_tri = f"primary_{node_prefix}_tri"
+        secondary_tri = f"secondary_{node_prefix}_tri"
+        graph.add(TexNode(primary_map, "VRayBitmap", params={
+            "HDRIMapName": primary_set[source_key], **bitmap_params,
+        }))
+        graph.add(_triplanar(primary_tri, primary_map, primary_size_m, randomize=True))
+        graph.add(TexNode(secondary_map, "VRayBitmap", params={
+            "HDRIMapName": secondary_set[source_key], **bitmap_params,
+        }))
+        graph.add(_triplanar(
+            secondary_tri,
+            secondary_map,
+            secondary_size_m,
+            randomize=True,
+            frame_offset=(17.0, 31.0, 11.0),
+            texture_rotation=(0.0, 0.0, 31.0),
+        ))
+        return primary_tri, secondary_tri
+
+    # One macro field drives every blend so a photographed aggregate cannot be
+    # recognised as a repeating cell from either the grandstands or a drone
+    # camera. `Mask` is the host-discovered, case-sensitive Mix map slot.
+    graph.add(TexNode("macro_noise", "Noise", params={
+        "size": macro_size_m,
+        "levels": 4.0,
+        "phase": 0.0,
+    }))
+    graph.add(_triplanar(
+        "macro_world",
+        "macro_noise",
+        macro_size_m,
+        texture_rotation=(0.0, 0.0, 13.0),
+    ))
+
+    primary_albedo, secondary_albedo = image_pair("albedo", "Diffuse")
+    graph.add(TexNode("albedo_mix", "Mix", params={"mixAmount": 0.5}, inputs={
+        "map1": primary_albedo,
+        "map2": secondary_albedo,
+        "Mask": "macro_world",
+    }))
+    graph.add(_dirt("albedo_dirt", "albedo_mix", 0.4))
+    graph.bind("texmap_diffuse", "albedo_dirt")
+
+    primary_rough, secondary_rough = image_pair("rough", "Rough", data=True)
+    graph.add(TexNode("rough_mix", "Mix", params={"mixAmount": 0.5}, inputs={
+        "map1": primary_rough,
+        "map2": secondary_rough,
+        "Mask": "macro_world",
+    }))
+    graph.add(TexNode("gloss", "ColorCorrection", params={"rewireMode": 2},
+                      inputs={"map": "rough_mix"}))
+    graph.bind("texmap_reflectionGlossiness", "gloss")
+
+    if normal_multiplier:
+        primary_normal, secondary_normal = image_pair("normal", "nor_gl", data=True)
+        graph.add(TexNode("normal_mix", "Mix", params={"mixAmount": 0.5}, inputs={
+            "map1": primary_normal,
+            "map2": secondary_normal,
+            "Mask": "macro_world",
+        }))
+        graph.add(TexNode("normal", "VRayNormalMap", params={
+            "normal_map_on": True,
+            "normal_map_multiplier": normal_multiplier,
+        }, inputs={"normal_map": "normal_mix"}))
         graph.bind("texmap_bump", "normal")
 
     return graph
