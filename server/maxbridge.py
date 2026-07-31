@@ -221,6 +221,27 @@ class MaxBridge:
             timeout=timeout,
         )
 
+    def set_keys(self, node: str, keys: list[dict], *, timeout: float = 180.0) -> dict:
+        """
+        Key a node's position and heading over frames.
+
+        Each key is ``{"frame": f, "pos": [x, y, z], "heading_deg": h}``; either
+        of the two values may be omitted. Check ``moved`` in the reply — a node
+        whose controller refuses keys accepts the assignment and keeps its old
+        value, which looks like a scene that simply does not animate.
+        """
+        return self._send(
+            {"command": "set_keys", "node": node, "keys": keys}, timeout=timeout
+        )
+
+    def animation_range(self, start: int, end: int, *, fps: int | None = None,
+                        timeout: float = 60.0) -> dict:
+        """Set the scene's animation range, and optionally the frame rate."""
+        return self._send(
+            {"command": "animation_range", "start": start, "end": end, "fps": fps},
+            timeout=timeout,
+        )
+
     def maxscript(self, code: str, timeout: float = 120.0) -> Any:
         """Evaluate raw MaxScript. Disabled unless ATLAS_ALLOW_MAXSCRIPT=1 in Max."""
         return self._send({"command": "maxscript", "code": code}, timeout=timeout)

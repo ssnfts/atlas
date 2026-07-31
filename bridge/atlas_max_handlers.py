@@ -574,6 +574,110 @@ def cmd_create_mesh(params: dict) -> dict:
     }
 
 
+def cmd_set_keys(params: dict) -> dict:
+    """
+    Key a node's position and Z rotation over a list of frames.
+
+    Until now a sequence from this project was a series of stills: move
+    everything, render, repeat. That is restartable and needs nothing stored in
+    the scene, but it leaves nothing *in* the scene either — the artist who
+    opens the file cannot scrub it, cannot retime it, and cannot hand it to a
+    render farm as an animation. Real keys fix that.
+
+    Rotation is a single angle about Z rather than a full matrix on purpose.
+    Everything this drives — a car on a circuit, a drone over it — is upright
+    and turning in plan, and a scalar heading is a value a human can read back
+    and check. A matrix per key is unreadable, and this project has already lost
+    a day to an orientation that was wrong in a way nobody could see.
+
+    ``pymxs.animate`` is what makes an assignment create a key instead of just
+    setting a value. Without it every write lands on frame 0 and the node sits
+    still, with nothing to say why.
+    """
+    name = str(params.get("node") or "")
+    node = rt.getNodeByName(name)
+    if node is None:
+        raise ValueError(f"no node named {name!r}")
+
+    keys = params.get("keys") or []
+    if not keys:
+        raise ValueError("'keys' is empty")
+
+    with pymxs.animate(True):
+        for key in keys:
+            frame = float(key["frame"])
+            with pymxs.attime(frame):
+                # **Rotation first, then position, and the order is load
+                # bearing.** Assigning `.rotation` rotates the node's whole
+                # transform, translation included: keying pos=(100,100) and then
+                # a 90 degree heading put the node at (-100,100). Measured, not
+                # reasoned — pos alone was right, pos with a zero heading was
+                # right, and only a non-zero heading moved it. Setting the
+                # rotation first and the position after leaves the translation
+                # as the last word.
+                heading = key.get("heading_deg")
+                if heading is not None:
+                    # Scene headings are clockwise from +Y (north); a right
+                    # handed Z rotation runs the other way, hence the sign.
+                    euler = rt.EulerAngles(0.0, 0.0, -float(heading))
+                    node.rotation = rt.eulerToQuat(euler)
+                position = key.get("pos")
+                if position is not None:
+                    x, y, z = position
+                    node.pos = rt.Point3(float(x), float(y), float(z))
+
+    # Read the transform back at the first and last key rather than trusting the
+    # write: a node with a position controller that refuses keys (a constraint,
+    # a locked track) accepts the assignment and keeps its old value.
+    first, last = float(keys[0]["frame"]), float(keys[-1]["frame"])
+    middle = float(keys[len(keys) // 2]["frame"])
+
+    samples = []
+    for f in (first, middle, last):
+        with pymxs.attime(f):
+            p = node.pos
+            samples.append((float(p.x), float(p.y), float(p.z)))
+
+    # Compared across three samples rather than just the ends, because a closed
+    # circuit puts the last key back on the first: a car that ran a whole lap
+    # has identical start and end positions, and an end-to-end test calls that
+    # "did not move". The first version of this check did exactly that and
+    # failed a lap that was keyed perfectly well.
+    spread = max(
+        abs(a[i] - bb[i])
+        for a in samples for bb in samples for i in range(3)
+    )
+
+    return {
+        "node": name,
+        "keys": len(keys),
+        "frame_range": [first, last],
+        "pos_at_first": list(samples[0]),
+        "pos_at_middle": list(samples[1]),
+        "pos_at_last": list(samples[2]),
+        "max_displacement": round(spread, 6),
+        "moved": spread > 1e-6,
+    }
+
+
+def cmd_animation_range(params: dict) -> dict:
+    """Set the scene's animation range and frame rate."""
+    start = int(params.get("start", 0))
+    end = int(params.get("end", 100))
+    if end <= start:
+        raise ValueError(f"animation range end ({end}) must exceed start ({start})")
+
+    if params.get("fps"):
+        rt.frameRate = int(params["fps"])
+    rt.animationRange = rt.interval(start, end)
+
+    return {
+        "start": int(rt.animationRange.start),
+        "end": int(rt.animationRange.end),
+        "fps": int(rt.frameRate),
+    }
+
+
 def cmd_vray_hdri_env(params: dict) -> dict:
     """
     Put a VRayHDRI in the environment slot, rotated to a given bearing.
@@ -945,6 +1049,8 @@ HANDLERS = {
     "scene_list": cmd_scene_list,
     "vray_sky_setup": cmd_vray_sky_setup,
     "vray_hdri_env": cmd_vray_hdri_env,
+    "set_keys": cmd_set_keys,
+    "animation_range": cmd_animation_range,
     "assign_material": cmd_assign_material,
     "create_mesh": cmd_create_mesh,
     "build_material": cmd_build_material,
