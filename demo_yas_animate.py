@@ -147,7 +147,10 @@ print(f"keyed {FIELD} cars x 3 parts, {len(sample_frames)} keys each")
 shot_log = []
 for index, cut in enumerate(CUTS, start=1):
     shot = cut.shot
-    name = f"Cam_{index:02d}_{shot.name}"
+    # Plain sequential names. The descriptive part lives in shot_list.json,
+    # because a camera list is read in a sequencer where "Shot_07" sorts and
+    # scans and "Cam_07_07_long_lens" does not.
+    name = f"Shot_{index:02d}"
     start_f, end_f = cut.start_frame, cut.end_frame
 
     first_pos, first_tgt, fov = raceanim.camera_for(
@@ -168,10 +171,13 @@ for index, cut in enumerate(CUTS, start=1):
 
     b.set_keys(name, cam_keys)
     b.set_keys(f"{name}_Target", tgt_keys)
-    shot_log.append({"camera": name, "kind": shot.kind,
-                     "frames": [start_f, end_f], "fov": fov, "note": shot.note})
-    print(f"  {name:28} {shot.kind:6} f{start_f:4d}-{end_f:<4d} "
-          f"{len(cam_keys)} keys  {shot.note}")
+    shot_log.append({"camera": name, "shot": shot.name, "kind": shot.kind,
+                     "frames": [start_f, end_f],
+                     "seconds": [round(start_f / FPS, 2), round(end_f / FPS, 2)],
+                     "lap": [shot.lap_from, shot.lap_to],
+                     "fov": fov, "note": shot.note})
+    print(f"  {name:9} {shot.kind:6} f{start_f:4d}-{end_f:<4d} "
+          f"{len(cam_keys):3d} keys  {shot.note}")
 
 (OUT / "shot_list.json").write_text(json.dumps(shot_log, indent=2), encoding="utf-8")
 
