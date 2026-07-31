@@ -65,7 +65,7 @@ where `ATLAS_ALLOW_MAXSCRIPT=0`.
 - [`server/weather.py`](server/weather.py) — `fetch_observation` returns `Observation` with `wind_speed_ms` and `wind_direction_deg`; ERA5 reference values are 7.34 m/s at 331°.
 - [`server/maxbridge.py`](server/maxbridge.py) — `maxscript(code)` method exists; bridge checks `ALLOW_MAXSCRIPT` on its side.
 
-**Status:** `[ ] pending`
+**Status:** `[x] done`
 
 ---
 
@@ -95,7 +95,7 @@ This is the "write to `out/tyfx_smoke.ms` and show before running" boundary.
 - Same as Sub-Task 1.
 - `out/` directory — already created by `mcp_server.py` (`OUT_DIR.mkdir(exist_ok=True)`).
 
-**Status:** `[ ] pending`
+**Status:** `[x] done`
 
 ---
 
@@ -127,7 +127,7 @@ separate from generation, so a reviewer can read the file before this is called.
 **Relevant Context:**
 - [`server/maxbridge.py`](server/maxbridge.py:245) — `maxscript()` method; bridge enforces the flag server-side in `bridge/atlas_max_handlers.py`.
 
-**Status:** `[ ] pending`
+**Status:** `[x] done`
 
 ---
 
@@ -160,7 +160,7 @@ opt in to running it.
 - [`server/mcp_server.py`](server/mcp_server.py:579) — `TOOLS` list, `_tool_result` decorator, `_bridge()` helper.
 - [`server/tyfx.py`](server/tyfx.py) — functions from Sub-Tasks 1–3.
 
-**Status:** `[ ] pending`
+**Status:** `[x] done`
 
 ---
 
@@ -198,7 +198,7 @@ as the test.
 - [`server/tyfx.py`](server/tyfx.py) — existing module.
 - [`docs/tyflow-fx-plan.md`](docs/tyflow-fx-plan.md) — verification section: "particle count per frame, non-zero in the window; a masked render confirming pixels move."
 
-**Status:** `[ ] pending`
+**Status:** `[x] done`
 
 ---
 
@@ -252,7 +252,7 @@ reviewed, then run. Same generate→write→run pattern as smoke.
   current state (`git diff HEAD server/raceanim.py`) before implementing Sub-Task 6
   to confirm `CRASH` and `crash_state` signatures have not changed.
 
-**Status:** `[ ] pending`
+**Status:** `[x] done`
 
 ---
 
@@ -297,7 +297,7 @@ Shading via `VRayLightMtl` on the particles (not actual lights — no shadow cos
 - Sub-Task 6 `contact_frame_for` helper — shared by debris and sparks.
 - `contact_frame_for` must be implemented in Sub-Task 6 before Sub-Task 7 can begin.
 
-**Status:** `[ ] pending`
+**Status:** `[x] done`
 
 ---
 
