@@ -361,6 +361,78 @@ def _masonry_graph(key: str, *, grain_m: float, dirt_m: float, bump: float,
     return graph
 
 
+def scanned_graph(key: str, spec, texture_set: dict, *, size_m: float,
+                  note: str = "") -> Graph:
+    """
+    A material built from a scanned PBR set rather than from noise.
+
+    Every map goes through a ``VRayTriplanarTex`` at a real-world ``size_m``,
+    which is what lets 379 building meshes with no UVs take a photographed
+    concrete: the projection is world-space, so the only thing that has to be
+    right is the physical size of the texture's repeat. Get that wrong and the
+    material is not subtly off — a 4 m concrete panel tiled at 0.4 m reads as
+    corduroy.
+
+    Two conversions are load-bearing and neither is obvious:
+
+    **Roughness is inverted.** Poly Haven ships a roughness map; V-Ray's slot is
+    *glossiness*, which is 1 - roughness. Wiring one to the other directly makes
+    every worn surface a mirror and every polished one matte, which looks like a
+    lighting problem rather than a plumbing one. The inversion is done by an
+    ``Output`` map with a negative RGB level, because V-Ray has no invert flag
+    on the bitmap itself.
+
+    **The normal map needs `VRayNormalMap`, not the bump slot.** A tangent-space
+    normal map fed straight into ``texmap_bump`` is interpreted as a height
+    field, and its flat blue-violet background then reads as a uniform slope.
+    ``VRayNormalMap`` decodes it properly. Poly Haven's ``nor_gl`` is the OpenGL
+    convention, which is the one V-Ray expects; ``nor_dx`` has the green channel
+    flipped and would invert every dent.
+    """
+    graph = Graph(key, spec, note=note or f"scanned PBR at {size_m:g} m repeat")
+
+    diffuse = texture_set.get("Diffuse")
+    if diffuse:
+        graph.add(TexNode("albedo_map", "VRayBitmap",
+                          params={"HDRIMapName": diffuse}))
+        graph.add(_triplanar("albedo", "albedo_map", size_m))
+        graph.add(_dirt("albedo_dirt", "albedo", 0.4))
+        graph.bind("texmap_diffuse", "albedo_dirt")
+
+    rough = texture_set.get("Rough")
+    if rough:
+        graph.add(TexNode("rough_map", "VRayBitmap",
+                          params={"HDRIMapName": rough,
+                                  "color_space": 0}))     # data, not sRGB
+        graph.add(_triplanar("rough_tri", "rough_map", size_m))
+        # 1 - roughness. The first attempt used an `Output` map's RGB level and
+        # offset, and the host refused both: they live on a sub-object rather
+        # than as flat parameters, the same shape as Checker's tiling. This is
+        # what the rejected map is for — the graph built either way and the
+        # difference would only have shown as every surface being wrong.
+        #
+        # ColorCorrection's rewireMode 2 is Max's own invert, and it is a plain
+        # parameter.
+        graph.add(TexNode("gloss", "ColorCorrection",
+                          params={"rewireMode": 2},
+                          inputs={"map": "rough_tri"}))
+        graph.bind("texmap_reflectionGlossiness", "gloss")
+
+    normal = texture_set.get("nor_gl")
+    if normal:
+        graph.add(TexNode("normal_map", "VRayBitmap",
+                          params={"HDRIMapName": normal,
+                                  "color_space": 0}))
+        graph.add(_triplanar("normal_tri", "normal_map", size_m))
+        graph.add(TexNode("normal", "VRayNormalMap",
+                          params={"normal_map_on": True,
+                                  "normal_map_multiplier": 1.0},
+                          inputs={"normal_map": "normal_tri"}))
+        graph.bind("texmap_bump", "normal")
+
+    return graph
+
+
 def _build_graphs() -> dict:
     graphs: dict[str, Graph] = {}
 
