@@ -616,10 +616,22 @@ def cmd_set_keys(params: dict) -> dict:
                 # rotation first and the position after leaves the translation
                 # as the last word.
                 heading = key.get("heading_deg")
-                if heading is not None:
+                pitch = key.get("pitch_deg")
+                roll = key.get("roll_deg")
+                if heading is not None or pitch is not None or roll is not None:
                     # Scene headings are clockwise from +Y (north); a right
                     # handed Z rotation runs the other way, hence the sign.
-                    euler = rt.EulerAngles(0.0, 0.0, -float(heading))
+                    #
+                    # Cars are modelled nose along +Y, so pitch is about X (the
+                    # lateral axis) and roll about Y (the nose axis). Euler
+                    # composition order would matter for large angles; these are
+                    # body attitude on a stiff race car and stay under 3 degrees,
+                    # where the difference is far below what a frame shows.
+                    euler = rt.EulerAngles(
+                        float(pitch or 0.0),
+                        float(roll or 0.0),
+                        -float(heading or 0.0),
+                    )
                     node.rotation = rt.eulerToQuat(euler)
                 position = key.get("pos")
                 if position is not None:
