@@ -517,6 +517,7 @@ def ribbon_mesh(
     ground=None,
     lift: float = 0.05,
     smooth_m: float = 0.0,
+    uv_v_fixed: float | None = None,
     mitre_limit: float = 4.0,
 ) -> Mesh:
     """
@@ -620,7 +621,42 @@ def ribbon_mesh(
             else:
                 dropped += 1
 
+    # Texture coordinates in **metres**, not normalised 0..1: u runs along the
+    # route and v across it, so one UV unit is one real metre. That is what lets
+    # a kerb stripe be specified as "0.5 m of red then 0.5 m of white" and come
+    # out that size on the ground, and it makes an edge line's width a physical
+    # number rather than a fraction of however long the route happens to be.
+    #
+    # u is accumulated along the *centre-line*, so both edges of a bend share it
+    # and the stripes stay square to the road instead of shearing at corners.
+    arc: list[float] = [0.0]
+    for i in range(len(spine) - 1):
+        arc.append(arc[-1] + math.hypot(spine[i + 1][0] - spine[i][0],
+                                        spine[i + 1][1] - spine[i][1]))
+    if path.closed and len(spine) > 1:
+        arc.append(arc[-1] + math.hypot(spine[0][0] - spine[-1][0],
+                                        spine[0][1] - spine[-1][1]))
+
+    def u_of(k: int) -> float:
+        owner = owners[k]
+        return arc[owner] if owner < len(arc) else arc[-1]
+
+    # ``uv_v_fixed`` pins v to one value across the whole width. A Checker is a
+    # 2D pattern, so a v that varies turns banding into a chequerboard; pinning
+    # it leaves the pattern varying along u alone, which is what a kerb's
+    # transverse stripes are. With u in metres and Checker's natural period of
+    # 1.0 UV, that lands 0.5 m bands — the real thing.
+    v_left = uv_v_fixed if uv_v_fixed is not None else 0.0
+    v_right = uv_v_fixed if uv_v_fixed is not None else width
+
+    uvs: list[tuple[float, float]] = []
+    for k in range(m):
+        uvs.append((u_of(k), v_left))
+    for k in range(m):
+        uvs.append((u_of(k), v_right))
+
     mesh = Mesh(verts=verts, faces=faces, name=name)
+    mesh.uvs = uvs
     mesh.metadata.update(
         {
             "kind": "roadway",
@@ -755,6 +791,290 @@ def _faces_up(verts, tri) -> bool:
     bx, by, _ = verts[j]
     cx, cy, _ = verts[k]
     return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) > EPS
+
+
+def kerb_ribbons(
+    path: Path,
+    *,
+    track_width: float,
+    kerb_width: float = 1.2,
+    name: str = "kerb",
+    frame: SceneFrame | None = None,
+    ground=None,
+    lift: float = 0.09,
+    smooth_m: float = 0.0,
+    min_turn_deg: float = 2.0,
+    run_out_m: float = 25.0,
+) -> list[Mesh]:
+    """
+    Kerbs along the outside and inside of the corners only.
+
+    A circuit is not kerbed end to end — a kerb marks where the track's edge is
+    a limit worth policing, which is a corner. Straights have a painted line and
+    nothing else. So this walks the centre-line, finds runs of vertices whose
+    turn exceeds ``min_turn_deg``, extends each run by ``run_out_m`` at both ends
+    (a real kerb starts before the apex and finishes after it), and builds a
+    narrow ribbon hard against the track edge on each side.
+
+    The kerb sits ``lift`` above the road rather than flush: a real one is a
+    raised, ramped casting a few centimetres proud, and coplanar geometry
+    z-fights. Its UVs run in metres along the route, so the red/white banding is
+    a real 0.5 m and not a fraction of the corner's length.
+
+    Returns one mesh per (corner, side). Separate meshes rather than one merged
+    ribbon because a kerb that jumps between corners as a single object gets a
+    continuous stripe pattern across the gap.
+    """
+    spine = path.xy[:-1] if (path.closed and len(path.xy) >= 2
+                             and _same(path.xy[0], path.xy[-1])) else path.xy
+    n = len(spine)
+    if n < 3:
+        return []
+
+    # Turn angle at each vertex.
+    turns = [0.0] * n
+    span = n if path.closed else n - 1
+    for i in range(n):
+        prev_i, next_i = (i - 1) % n, (i + 1) % n
+        if not path.closed and (i == 0 or i == n - 1):
+            continue
+        ax = spine[i][0] - spine[prev_i][0]
+        ay = spine[i][1] - spine[prev_i][1]
+        bx = spine[next_i][0] - spine[i][0]
+        by = spine[next_i][1] - spine[i][1]
+        la, lb = math.hypot(ax, ay), math.hypot(bx, by)
+        if la < EPS or lb < EPS:
+            continue
+        cos = max(-1.0, min(1.0, (ax * bx + ay * by) / (la * lb)))
+        turns[i] = math.degrees(math.acos(cos))
+
+    cornering = [t >= min_turn_deg for t in turns]
+
+    # Grow each corner outward by run_out_m of arc length.
+    seg = [math.hypot(spine[(i + 1) % n][0] - spine[i][0],
+                      spine[(i + 1) % n][1] - spine[i][1]) for i in range(n)]
+    grown = list(cornering)
+    for i in range(n):
+        if not cornering[i]:
+            continue
+        for direction in (1, -1):
+            travelled, j = 0.0, i
+            while travelled < run_out_m:
+                nxt = (j + direction) % n
+                if not path.closed and (nxt == 0 or nxt == n - 1):
+                    break
+                travelled += seg[min(j, nxt)]
+                grown[nxt] = True
+                j = nxt
+
+    # Contiguous runs of kerbed vertices.
+    runs: list[list[int]] = []
+    current: list[int] = []
+    order = list(range(n)) + ([0] if path.closed else [])
+    for i in order:
+        if grown[i]:
+            current.append(i)
+        elif current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    if not runs:
+        return []
+
+    half = track_width / 2.0
+    meshes: list[Mesh] = []
+    for r_index, run in enumerate(runs):
+        if len(run) < 2:
+            continue
+        pts = [spine[i] for i in run]
+        for side, sign in (("outer", 1.0), ("inner", -1.0)):
+            # Offset the corner's centre-line out to the track edge, then build a
+            # narrow ribbon centred just beyond it.
+            offset_mid = half + kerb_width / 2.0
+            rail = _offset_polyline(pts, sign * offset_mid)
+            if len(rail) < 2:
+                continue
+            sub = Path(xy=rail, closed=False, tags=dict(path.tags),
+                       osm_ids=list(path.osm_ids))
+            try:
+                mesh = ribbon_mesh(
+                    sub, width=kerb_width,
+                    name=f"{name}_{r_index:02d}_{side}",
+                    frame=frame, ground=ground, lift=lift, smooth_m=smooth_m,
+                    uv_v_fixed=0.25,
+                )
+            except RoadwayError:
+                continue
+            mesh.metadata["kind"] = "kerb"
+            mesh.metadata["side"] = side
+            meshes.append(mesh)
+    return meshes
+
+
+def edge_lines(
+    path: Path,
+    *,
+    track_width: float,
+    line_width: float = 0.15,
+    name: str = "line",
+    frame: SceneFrame | None = None,
+    ground=None,
+    lift: float = 0.075,
+    smooth_m: float = 0.0,
+) -> list[Mesh]:
+    """
+    The painted white line down each edge of the track.
+
+    Geometry rather than a texture, deliberately. Painting it into the asphalt
+    map would need a projection that follows the ribbon, and the world-space
+    triplanar every other graph uses is fixed to the world axes — the line would
+    stay pointing north while the track curved away beneath it. A thin ribbon
+    inherits the curve for free, and needs no texmap parameter that could not be
+    verified offline.
+
+    Sits between the road (``lift`` 0.06) and the kerb (0.09) so paint reads as
+    paint: on the surface, not floating over it and not fighting it.
+    """
+    half = track_width / 2.0
+    inset = half - line_width / 2.0
+    out: list[Mesh] = []
+    for side, sign in (("left", 1.0), ("right", -1.0)):
+        rail = _offset_polyline(path.xy, sign * inset)
+        if len(rail) < 2:
+            continue
+        sub = Path(xy=rail, closed=path.closed, tags=dict(path.tags),
+                   osm_ids=list(path.osm_ids))
+        try:
+            mesh = ribbon_mesh(sub, width=line_width, name=f"{name}_{side}",
+                               frame=frame, ground=ground, lift=lift,
+                               smooth_m=smooth_m)
+        except RoadwayError:
+            continue
+        mesh.metadata["kind"] = "edge_line"
+        out.append(mesh)
+    return out
+
+
+def grid_boxes(
+    path: Path,
+    *,
+    start_index: int = 0,
+    slots: int = 20,
+    track_width: float,
+    box_length: float = 6.0,
+    box_width: float = 3.0,
+    pitch: float = 8.0,
+    stagger: float = 4.0,
+    offset_m: float = 3.5,
+    name: str = "grid",
+    z: float = 0.0,
+    lift: float = 0.075,
+) -> tuple[list[Mesh], list[tuple[float, float, float]]]:
+    """
+    Starting-grid boxes, and the placement each car sits on.
+
+    F1 grids are staggered: the odd slots sit on one side of the centre-line and
+    the even slots on the other, each pair offset by ``stagger`` along the track
+    so no car is directly alongside another. ``pitch`` is the along-track spacing
+    between same-side slots — 8 m is the regulation figure.
+
+    Returns ``(meshes, placements)`` where each placement is
+    ``(x, y, heading_degrees)`` at the centre of a box, heading measured
+    clockwise from +Y (true north) to match the scene frame and the sun. The
+    placements are what a car — or any other prop — gets positioned by, so the
+    boxes and the things standing on them cannot drift apart.
+    """
+    spine = path.xy[:-1] if (path.closed and len(path.xy) >= 2
+                             and _same(path.xy[0], path.xy[-1])) else path.xy
+    n = len(spine)
+    if n < 2:
+        return [], []
+
+    # Walk backwards from the start line, laying slots down the straight.
+    meshes: list[Mesh] = []
+    placements: list[tuple[float, float, float]] = []
+
+    for slot in range(slots):
+        row = slot // 2
+        side = 1.0 if slot % 2 == 0 else -1.0
+        back = row * pitch + (0.0 if slot % 2 == 0 else stagger)
+
+        centre = _walk_back(spine, start_index, back, closed=path.closed)
+        if centre is None:
+            break
+        (cx, cy), (tx, ty) = centre
+
+        # Lateral offset to the slot's side of the centre-line.
+        nx, ny = -ty, tx
+        px = cx + nx * side * offset_m
+        py = cy + ny * side * offset_m
+
+        verts, faces = _rect(px, py, tx, ty, box_length, box_width, z + lift)
+        mesh = Mesh(verts=verts, faces=faces, name=f"{name}_{slot + 1:02d}")
+        mesh.metadata.update({"kind": "grid_box", "slot": slot + 1})
+        meshes.append(mesh)
+
+        heading = math.degrees(math.atan2(tx, ty)) % 360.0
+        placements.append((px, py, heading))
+
+    return meshes, placements
+
+
+def _walk_back(spine, start_index: int, distance: float, *, closed: bool):
+    """Travel ``distance`` backwards along the spine from ``start_index``.
+
+    Returns ``((x, y), (tx, ty))`` — the point and the unit tangent in the
+    direction of travel — or None if the route runs out."""
+    n = len(spine)
+    i = start_index % n
+    remaining = distance
+    while remaining > 0.0:
+        prev_i = (i - 1) % n
+        if not closed and i == 0:
+            return None
+        ax, ay = spine[prev_i]
+        bx, by = spine[i]
+        seg = math.hypot(bx - ax, by - ay)
+        if seg < EPS:
+            i = prev_i
+            continue
+        if seg >= remaining:
+            f = remaining / seg
+            px, py = bx - (bx - ax) * f, by - (by - ay) * f
+            return (px, py), ((bx - ax) / seg, (by - ay) / seg)
+        remaining -= seg
+        i = prev_i
+
+    bx, by = spine[i]
+    prev_i = (i - 1) % n
+    ax, ay = spine[prev_i]
+    seg = math.hypot(bx - ax, by - ay) or 1.0
+    return (bx, by), ((bx - ax) / seg, (by - ay) / seg)
+
+
+def _rect(cx, cy, tx, ty, length, width, z):
+    """A flat rectangle centred at (cx, cy), aligned to the tangent (tx, ty)."""
+    nx, ny = -ty, tx
+    hl, hw = length / 2.0, width / 2.0
+    corners = [
+        (cx - tx * hl - nx * hw, cy - ty * hl - ny * hw),
+        (cx + tx * hl - nx * hw, cy + ty * hl - ny * hw),
+        (cx + tx * hl + nx * hw, cy + ty * hl + ny * hw),
+        (cx - tx * hl + nx * hw, cy - ty * hl + ny * hw),
+    ]
+    verts = [(x, y, z) for x, y in corners]
+    # Wind CCW seen from above so the normal points +Z, like every other surface.
+    if (corners[1][0] - corners[0][0]) * (corners[2][1] - corners[0][1]) - \
+       (corners[1][1] - corners[0][1]) * (corners[2][0] - corners[0][0]) < 0:
+        verts.reverse()
+    return verts, [(0, 1, 2), (0, 2, 3)]
+
+
+def _offset_polyline(pts, distance: float):
+    """Offset an open polyline sideways by ``distance`` (left positive)."""
+    left, right, _ = offset_ribbon(pts, abs(distance) * 2.0, closed=False)
+    return left if distance >= 0 else right
 
 
 def centerlines_to_meshes(

@@ -108,6 +108,35 @@ PRESETS: dict[str, MaterialSpec] = {
             "read as a track at grazing light."
         ),
     ),
+    "car_body": MaterialSpec(
+        "atlas_car_body", (28, 30, 36), (128, 130, 136), 0.88, 1.6,
+        note=(
+            "generic single-seater bodywork — no livery, deliberately. A dark "
+            "clearcoat with a tight specular is what makes a car read as a car "
+            "at a distance: the highlight travels along the bodywork as the "
+            "camera moves, which no diffuse colour reproduces."
+        ),
+    ),
+    "line_paint": MaterialSpec(
+        "atlas_line_paint", (232, 231, 226), (18, 18, 18), 0.30, 1.5,
+        note=(
+            "track edge lines and grid boxes. Built as thin geometry rather "
+            "than painted into the asphalt map: a line has to stay parallel to "
+            "an edge through every corner, and the world-space triplanar the "
+            "other graphs use cannot hold that. Geometry follows the curve for "
+            "free and needs no texmap parameter that could not be verified "
+            "offline."
+        ),
+    ),
+    "kerb": MaterialSpec(
+        "atlas_kerb", (196, 196, 196), (30, 30, 30), 0.55, 1.5,
+        note=(
+            "the red/white banding comes from the texture graph, not from this "
+            "colour — a kerb is two colours and a MaterialSpec holds one. The "
+            "base is the white band; the red is mixed over it in UV space so "
+            "the stripes run along the kerb as it bends."
+        ),
+    ),
     "grandstand": MaterialSpec(
         "atlas_grandstand", (74, 88, 112), (26, 26, 26), 0.40, 1.5,
         note=(

@@ -418,22 +418,68 @@ def _build_graphs() -> dict:
     track.add(TexNode("patchy", "Mix", params={"mixAmount": 0.22},
                       inputs={"map1": "base", "map2": "patches_world"}))
     # Fine structure: the aggregate itself, weak so it never dominates.
-    track.add(TexNode("aggregate", "Noise", params={"size": 0.18, "levels": 2.0}))
-    track.add(_triplanar("aggregate_world", "aggregate", 0.18))
-    track.add(TexNode("surfaced", "Mix", params={"mixAmount": 0.12},
+    #
+    # 0.18 m was too fine and too strong. Seen from a camera standing on the
+    # grid it stopped reading as asphalt and started reading as loose gravel —
+    # the "sandpaper" failure. A racing surface is a *fine-graded* wearing
+    # course: at any distance a person can stand, the individual stones are
+    # below the eye's resolution and what remains is a smooth dark sheet with
+    # slow tonal drift. 0.45 m at a lower mix keeps the drift and drops the grit.
+    track.add(TexNode("aggregate", "Noise", params={"size": 0.45, "levels": 2.0}))
+    track.add(_triplanar("aggregate_world", "aggregate", 0.45))
+    track.add(TexNode("surfaced", "Mix", params={"mixAmount": 0.06},
                       inputs={"map1": "patchy", "map2": "aggregate_world"}))
     # Grime collects at the edges of the ribbon and against kerbs, not mid-track
     # where the cars sweep it away; a wide dirt radius approximates that.
     track.add(_dirt("weathered", "surfaced", 0.8))
     track.bind("texmap_diffuse", "weathered")
-    track.add(TexNode("relief", "Noise", params={"size": 0.18,
-                                                 "bump_multiplier": 6.0}))
-    track.add(_triplanar("relief_world", "relief", 0.18))
-    track.bind("texmap_bump", "relief_world")
-    # Gloss break at the coarse scale: the racing line is polished, the
-    # off-line surface is not, and that contrast is the low-sun tell.
-    track.bind("texmap_reflectionGlossiness", "patches_world")
+    # **No bump at all**, and that is the measured answer rather than a
+    # preference. A racing surface is a fine-graded wearing course whose relief
+    # is one to two millimetres — at 1:1 that is well under a pixel from any
+    # camera a person could stand at. Meanwhile this scene's sun sits at 7.5
+    # degrees, and at grazing incidence *any* procedural bump becomes dramatic:
+    # every lit micro-ridge catches the warm low sun and every trough falls to
+    # blue sky fill, so the track rendered as tan-and-navy corrugation.
+    #
+    # Tried in order, each re-rendered and looked at: 0.18 m at 6.0 (gravel),
+    # 0.45 m at 2.0 (still corrugated), none (correct). The lesson is that bump
+    # strength cannot be judged against a midday reference and then reused at
+    # golden hour — the sun angle is part of the material's tuning.
+    # Glossiness is deliberately left as the base spec's flat 0.62 rather than
+    # driven by a map. Wiring `patches_world` into it looked right in theory —
+    # the racing line is polished and the off-line surface is not — and was
+    # badly wrong on the host: glossiness is a 0..1 *scalar*, a Noise is mostly
+    # bright, and the bright half went to near-mirror. From a camera on the grid
+    # the track turned into tan camouflage, because every mirror patch was
+    # reflecting the sand around the circuit.
+    #
+    # This is the same failure as the VRayMultiSubTex one recorded above: a map
+    # feeding a scalar slot whose legal range it does not respect. A gloss break
+    # needs a map remapped into a narrow band around the base value, not a raw
+    # noise, and that is a real change rather than a rewiring.
     graphs["track_asphalt"] = track
+
+    # Kerb. The only graph here that works in **UV space** rather than world
+    # space: a triplanar projection is fixed to the world axes, so its stripes
+    # would stay pointing north while the kerb curves away underneath them. The
+    # ribbon's UVs run in metres along the kerb, and Checker's natural period of
+    # 1.0 UV puts the boundary every 0.5 m — the real band width — while a pinned
+    # v keeps it striped instead of chequered.
+    kerb = Graph("kerb", materials.PRESETS["kerb"],
+                 note="UV-space Checker: 0.5 m red/white bands that follow the "
+                      "kerb round a corner, which world-space projection cannot do")
+    kerb.add(TexNode("bands", "Checker",
+                     params={"Soften": 0.02,
+                             "color1": {"__color__": [178, 34, 34]},   # red band
+                             "color2": {"__color__": [222, 222, 220]}}))  # white
+    kerb.add(_dirt("weathered", "bands", 0.4))
+    kerb.bind("texmap_diffuse", "weathered")
+    # A kerb is a ramped casting, not a flat sticker: the same banding drives a
+    # strong bump so the ribs catch the low sun across their edges.
+    kerb.add(TexNode("ribs", "Checker",
+                     params={"Soften": 0.05, "bump_multiplier": 40.0}))
+    kerb.bind("texmap_bump", "ribs")
+    graphs["kerb"] = kerb
 
     # Grandstand seating. The tell is *row pitch*: a seating deck is a few
     # thousand small units on a raked plane at a very regular ~0.8 m spacing,

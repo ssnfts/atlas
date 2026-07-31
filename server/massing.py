@@ -74,6 +74,11 @@ class Mesh:
     faces: list[tuple[int, int, int]] = field(default_factory=list)
     name: str = "building"
     metadata: dict = field(default_factory=dict)
+    # Texture coordinates, one per vertex, sharing ``faces``. Empty for massing,
+    # which is projected in world space and needs none; a roadway fills it,
+    # because a kerb stripe has to follow the kerb round a bend and world-space
+    # projection cannot do that.
+    uvs: list[tuple[float, float]] = field(default_factory=list)
 
     @property
     def vertex_count(self) -> int:

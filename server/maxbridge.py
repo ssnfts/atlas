@@ -238,6 +238,8 @@ class MaxBridge:
         verts: list[tuple[float, float, float]],
         faces: list[tuple[int, int, int]],
         *,
+        uvs: list[tuple[float, float]] | None = None,
+        smooth: int = 0,
         wirecolor: tuple[float, float, float] | None = None,
         timeout: float = 300.0,
     ) -> dict:
@@ -260,6 +262,8 @@ class MaxBridge:
                 "name": name,
                 "verts": [[float(x), float(y), float(z)] for x, y, z in verts],
                 "faces": [[int(a), int(b), int(c)] for a, b, c in faces],
+                "uvs": [[float(u), float(v)] for u, v in uvs] if uvs else None,
+                "smooth": int(smooth),
                 "wirecolor": list(wirecolor) if wirecolor else None,
             },
             timeout=timeout,
@@ -287,15 +291,20 @@ class MaxBridge:
         """
         results: list[dict] = []
         for start in range(0, len(meshes), chunk):
-            steps = [
-                {
+            steps = []
+            for entry in meshes[start:start + chunk]:
+                # (name, verts, faces) or (name, verts, faces, uvs).
+                name, verts, faces = entry[0], entry[1], entry[2]
+                uvs = entry[3] if len(entry) > 3 else None
+                step = {
                     "command": "create_mesh",
                     "name": name,
                     "verts": [[float(x), float(y), float(z)] for x, y, z in verts],
                     "faces": [[int(a), int(b), int(c)] for a, b, c in faces],
                 }
-                for name, verts, faces in meshes[start:start + chunk]
-            ]
+                if uvs:
+                    step["uvs"] = [[float(u), float(v)] for u, v in uvs]
+                steps.append(step)
             results += self.batch(steps, stop_on_error=stop_on_error, timeout=timeout)
         return results
 

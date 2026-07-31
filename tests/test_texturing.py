@@ -204,13 +204,31 @@ def test_duplicate_node_ids_are_refused():
         graph.add(TexNode("a", "Noise"))
 
 
-def test_every_graph_drives_diffuse_and_bump():
-    """
-    Bump is what sells surface at grazing angles, which is most of a sun study.
-    A graph without it is a flat colour with extra steps.
-    """
+# Surfaces whose real relief is below a pixel at 1:1, so a bump map can only
+# invent detail that is not there. A racing circuit's wearing course is graded
+# to one or two millimetres; under this project's characteristic low sun any
+# procedural bump on it turned the track into tan-and-navy corrugation.
+_INTENTIONALLY_FLAT = {"track_asphalt"}
+
+
+def test_every_graph_drives_diffuse():
     for graph in GRAPHS.values():
         assert "texmap_diffuse" in graph.channels, f"{graph.key} has no diffuse"
+
+
+def test_graphs_drive_bump_unless_the_surface_is_genuinely_flat():
+    """
+    Bump is what sells surface at grazing angles, which is most of a sun study,
+    so its absence has to be a decision rather than an oversight. The exception
+    list is the decision, and it is small on purpose.
+    """
+    for graph in GRAPHS.values():
+        if graph.key in _INTENTIONALLY_FLAT:
+            assert "texmap_bump" not in graph.channels, (
+                f"{graph.key} is listed as intentionally flat but drives bump; "
+                "remove it from the list or remove the binding"
+            )
+            continue
         assert "texmap_bump" in graph.channels, f"{graph.key} has no bump"
 
 
@@ -221,16 +239,45 @@ def test_channels_stay_within_the_declared_set():
 
 # ── World-space projection ────────────────────────────────────────────────────
 
+# Graphs that deliberately work in UV space instead. A kerb's stripes have to
+# run along the kerb as it curves, and a world-space projection is locked to the
+# world axes — the bands would stay pointing north while the corner turned away
+# beneath them. Roadway ribbons carry real UVs (metres along, metres across), so
+# these graphs have coordinates to use; buildings do not, which is why the rule
+# holds everywhere else.
+_UV_SPACE_GRAPHS = {"kerb"}
+
+
 def test_patterns_are_projected_in_world_space():
     """
     VRayTriplanarTex is what makes these graphs work on meshes with NO UVs —
-    which is every building Atlas currently produces. Without it the maps land
-    on default coordinates and stretch unpredictably.
+    which is every building Atlas produces. Without it the maps land on default
+    coordinates and stretch unpredictably.
     """
     for graph in GRAPHS.values():
+        if graph.key in _UV_SPACE_GRAPHS:
+            assert not any(n.cls == "VRayTriplanarTex" for n in graph.nodes.values()), (
+                f"{graph.key} is declared UV-space but also projects in world "
+                "space; the two fight and the result depends on wiring order"
+            )
+            continue
         assert any(n.cls == "VRayTriplanarTex" for n in graph.nodes.values()), (
             f"{graph.key} has no world-space projection and needs UVs it does not have"
         )
+
+
+def test_uv_space_graphs_are_only_used_on_meshes_that_carry_uvs():
+    """
+    A UV-space graph on a mesh with no texture coordinates lands on whatever
+    default the host invents, which is the silent-wrong-output failure this
+    project keeps hitting. The pairing is asserted here so the two cannot drift:
+    every UV-space graph must name a preset the roadway module actually builds.
+    """
+    import roadway  # noqa: PLC0415 - imported here to keep the module list flat
+
+    assert _UV_SPACE_GRAPHS <= set(GRAPHS)
+    # roadway is the only producer of UV'd meshes today.
+    assert hasattr(roadway, "kerb_ribbons")
 
 
 def test_projection_sizes_are_physical_and_plausible():

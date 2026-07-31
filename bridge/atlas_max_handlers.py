@@ -504,13 +504,51 @@ def cmd_create_mesh(params: dict) -> dict:
         x, y, z = vertex
         rt.setVert(msh, i + 1, rt.Point3(float(x), float(y), float(z)))
 
+    # Smoothing group 0 = faceted, and it is the right default: a building is
+    # flat planes meeting at hard corners, and smoothing them averages the
+    # normals across the roof edge, giving every block a soft inflated
+    # silhouette. But it is wrong for anything actually curved — a 16-sided
+    # wheel shaded faceted reads as an octagon, which is what made the car
+    # proxies look like stacked boxes. Callers with curved geometry pass 1.
+    smooth_group = int(params.get("smooth") or 0)
+
     for i, face in enumerate(faces):
         a, b, c = face
         rt.setFace(msh, i + 1, rt.Point3(a + 1, b + 1, c + 1))
-        # Smoothing group 0 = faceted. A building is flat planes meeting at hard
-        # corners; smoothing them averages the normals across the roof edge and
-        # gives every block a soft, inflated silhouette in the render.
-        rt.setFaceSmoothGroup(msh, i + 1, 0)
+        rt.setFaceSmoothGroup(msh, i + 1, smooth_group)
+
+    # Texture coordinates, one per vertex, sharing the face list.
+    #
+    # Without these a procedural map can only be projected in *world* space,
+    # which is fine for a wall of concrete and useless for anything that has to
+    # follow a shape: kerb stripes must run along a kerb as it bends, and an
+    # edge line must stay parallel to the edge. Both need a coordinate that
+    # travels with the surface, which is what a UV is.
+    #
+    # `buildTVFaces` must come *after* the tverts exist and *before* setTVFace,
+    # and it resets the map face list — calling it later wipes what was set.
+    uvs = params.get("uvs")
+    uv_report: dict = {}
+    if uvs:
+        if len(uvs) != vertex_count:
+            raise ValueError(
+                f"'uvs' has {len(uvs)} entries for {vertex_count} vertices; "
+                "one texture coordinate per vertex is required"
+            )
+        rt.setNumTVerts(msh, vertex_count)
+        for i, uv in enumerate(uvs):
+            u, v = (list(uv) + [0.0])[:2]
+            rt.setTVert(msh, i + 1, rt.Point3(float(u), float(v), 0.0))
+        rt.buildTVFaces(msh)
+        for i, face in enumerate(faces):
+            a, b, c = face
+            rt.setTVFace(msh, i + 1, rt.Point3(a + 1, b + 1, c + 1))
+        # Read back rather than assume: a mesh with tverts set but no TVFaces
+        # renders untextured with nothing in any log to say so.
+        uv_report = {
+            "tvert_count": int(rt.getNumTVerts(msh)),
+            "tvface_count": int(rt.meshop.getNumMapFaces(msh, 1)),
+        }
 
     msh.name = name
     if params.get("wirecolor"):
@@ -532,6 +570,7 @@ def cmd_create_mesh(params: dict) -> dict:
         "bbox_min": [float(low.x), float(low.y), float(low.z)],
         "bbox_max": [float(high.x), float(high.y), float(high.z)],
         "units": str(rt.units.SystemType),
+        **uv_report,
     }
 
 

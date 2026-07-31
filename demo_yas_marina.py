@@ -18,6 +18,7 @@ from statistics import median
 ROOT = Path(r"C:\Users\mabdu\Desktop\atlas")
 sys.path.insert(0, str(ROOT / "server"))
 
+import cars                                                       # noqa: E402
 import osm                                                        # noqa: E402
 import roadway                                                    # noqa: E402
 import terrain                                                    # noqa: E402
@@ -114,6 +115,29 @@ print(f"  LAP LENGTH {lap:.1f} m vs published 5281 m "
 if skipped:
     print("  skipped:", skipped)
 
+# ── track furniture: kerbs, painted lines, the grid, and cars on it ───────────
+lap = roadway.stitch_paths(main, frame)[0]
+
+kerbs = roadway.kerb_ribbons(lap, track_width=TRACK_W, kerb_width=1.2,
+                             frame=frame, ground=flat, lift=0.09)
+lines = roadway.edge_lines(lap, track_width=TRACK_W, line_width=0.15,
+                           frame=frame, ground=flat, lift=0.075)
+boxes, placements = roadway.grid_boxes(lap, start_index=0, slots=20,
+                                       track_width=TRACK_W, z=SITE_Z)
+grid_cars = cars.cars_on_grid(placements, z=SITE_Z)
+
+print(f"kerbs    : {len(kerbs)} ribbons over "
+      f"{sum(len(k.faces) for k in kerbs)} faces (corners only)")
+print(f"lines    : {len(lines)} edge lines")
+print(f"grid     : {len(boxes)} boxes, {len(grid_cars)} cars "
+      f"(generic open-wheel proxies, 2022 regulation dimensions — not F1 models)")
+
+# The placements are written out so a bought car model can be dropped onto the
+# same twenty slots these proxies stand on.
+(OUT / "grid_placements.json").write_text(
+    json.dumps(cars.placements_to_matrices(placements, z=SITE_Z), indent=2),
+    encoding="utf-8")
+
 # ── context buildings ─────────────────────────────────────────────────────────
 buildings = osm.fetch_for_site(frame, BUILDING_RADIUS)
 b_meshes, b_skipped = buildings_to_meshes(buildings, frame, flat)
@@ -143,8 +167,12 @@ def flat_sheet(name, half, z, cells=48):
     return m
 
 terrain_mesh = flat_sheet("atlas_terrain", TERRAIN_RADIUS, SITE_Z)
+# UVs ride along as a fourth element where a mesh has them; the kerbs need them
+# (their stripes are UV-space) and nothing else is harmed by carrying them.
 push = [(terrain_mesh.name, terrain_mesh.verts, terrain_mesh.faces)]
-push += [(m.name, m.verts, m.faces) for m in track_meshes + pit_meshes]
+push += [(m.name, m.verts, m.faces, m.uvs)
+         for m in track_meshes + pit_meshes + kerbs + lines]
+push += [(m.name, m.verts, m.faces) for m in boxes + grid_cars]
 push += [(m.name, m.verts, m.faces) for m in b_meshes]
 results = b.create_meshes(push, chunk=25, timeout=1200.0)
 failed = [r for r in results if not r.get("ok")]
@@ -179,10 +207,25 @@ def build_graph(key, nodes, label):
           + (f"  {list(rej)[:2]}" if rej else ""))
     return rej
 
+def assign_flat(key, nodes, label):
+    """A plain VRayMtl, for surfaces whose look is a colour and a gloss rather
+    than a pattern — paint and car bodywork."""
+    if not nodes:
+        return
+    res = b.assign_material(nodes, params=PRESETS[key].to_params(),
+                            name=PRESETS[key].name)
+    rej = res.get("rejected") or {}
+    print(f"  {label:22} {len(nodes):5d} nodes  rejected={len(rej)}")
+
+
 print("\nmaterials:")
 track_nodes = [m.name for m in track_meshes + pit_meshes]
 build_graph("track_asphalt", track_nodes, "track_asphalt")
 build_graph("ground", ["atlas_terrain"], "ground")
+if kerbs:
+    build_graph("kerb", [m.name for m in kerbs], "kerb")
+assign_flat("line_paint", [m.name for m in lines + boxes], "line_paint")
+assign_flat("car_body", [m.name for m in grid_cars], "car_body")
 
 pairs = [(bu, m.name) for bu, m in zip(buildings, b_meshes)]
 for key, nodes in group_by_material(pairs).items():
