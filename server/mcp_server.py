@@ -50,6 +50,7 @@ import attribution  # noqa: E402
 import materials  # noqa: E402
 import osm  # noqa: E402
 import terrain  # noqa: E402
+import tyfx  # noqa: E402
 from frame import SceneFrame  # noqa: E402
 from massing import buildings_to_meshes  # noqa: E402
 from maxbridge import MaxBridge, MaxBridgeError  # noqa: E402
@@ -576,6 +577,164 @@ def _count_classes(nodes) -> dict:
 
 # ── Server ────────────────────────────────────────────────────────────────────
 
+@_tool_result
+def atlas_tyre_smoke(
+    emitter_nodes: list[str],
+    spine_json: str,
+    *,
+    execute: bool = False,
+    speed_threshold_kmh: float = 200.0,
+    end_frame: int = 2400,
+    wind_bearing_deg: float = 331.0,
+    wind_speed_ms: float = 7.34,
+    site_z: float = 5.27,
+) -> dict:
+    """
+    Generate (and optionally run) the tyFlow tyre-smoke event graph.
+
+    Writes the MaxScript to out/tyfx_smoke.ms and returns a summary so the
+    operator can review the file before running it. Set execute=True to also
+    send it to 3ds Max — requires ATLAS_ALLOW_MAXSCRIPT=1 in the host
+    environment before Max was launched.
+
+    Args:
+        emitter_nodes: Names of the rear tyre mesh nodes in the scene
+            (e.g. ["car_03_tyres", "car_04_tyres"]).
+        spine_json: JSON array of [x, y] pairs — the circuit spine used to
+            compute the per-frame speed gate from raceanim.speed_profile.
+        execute: When False (default) only writes the script. When True also
+            executes it via the bridge (requires ATLAS_ALLOW_MAXSCRIPT=1).
+        speed_threshold_kmh: Emit only when car speed exceeds this. Default
+            200 km/h captures braking zones and the crash site.
+        end_frame: Last frame of the animation range.
+        wind_bearing_deg: ERA5 wind bearing in degrees from north (default 331).
+        wind_speed_ms: ERA5 wind speed in m/s (default 7.34).
+        site_z: Ground elevation in scene metres (Yas Marina = 5.27).
+    """
+    import json as _json
+    spine = [tuple(p) for p in _json.loads(spine_json)]
+    path = OUT_DIR / "tyfx_smoke.ms"
+    OUT_DIR.mkdir(exist_ok=True)
+
+    result = tyfx.write_smoke_script(
+        path, emitter_nodes, spine,
+        wind_bearing_deg=wind_bearing_deg,
+        wind_speed_ms=wind_speed_ms,
+        site_z=site_z,
+        end_frame=end_frame,
+        speed_threshold_ms=speed_threshold_kmh / 3.6,
+    )
+
+    if execute:
+        run_result = tyfx.run_smoke_script(_bridge(), path)
+        result["executed"] = run_result
+    else:
+        result["note"] = (
+            "Script written but not executed. Review out/tyfx_smoke.ms "
+            "then call again with execute=True, or run it manually from "
+            "the MaxScript listener."
+        )
+    return result
+
+
+@_tool_result
+def atlas_crash_debris(
+    wing_nodes: list[str],
+    spine_json: str,
+    *,
+    execute: bool = False,
+    end_frame: int = 2400,
+    site_z: float = 5.27,
+    fps: int = 24,
+) -> dict:
+    """
+    Generate (and optionally run) the crash-debris tyFlow event graph.
+
+    Writes the MaxScript to out/tyfx_debris.ms. Debris starts at the contact
+    frame derived from raceanim.CRASH (at_distance_m=3650, lap ~0.69), which
+    is inside the 11_crash_wide and 12_crash_tight shot windows.
+
+    Args:
+        wing_nodes: Names of the front-wing mesh nodes to fracture
+            (e.g. ["car_03_body"]). Front wing only — not the monocoque.
+        spine_json: JSON array of [x, y] circuit spine pairs.
+        execute: Run via bridge when True (requires ATLAS_ALLOW_MAXSCRIPT=1).
+        end_frame: Last frame of the animation range.
+        site_z: Ground elevation in scene metres.
+        fps: Frames per second (default 24).
+    """
+    import json as _json
+    from raceanim import CRASH
+    spine = [tuple(p) for p in _json.loads(spine_json)]
+    path = OUT_DIR / "tyfx_debris.ms"
+    OUT_DIR.mkdir(exist_ok=True)
+
+    result = tyfx.write_debris_script(
+        path, wing_nodes, spine, CRASH,
+        site_z=site_z, end_frame=end_frame, fps=fps,
+    )
+
+    if execute:
+        run_result = tyfx.run_debris_script(_bridge(), path)
+        result["executed"] = run_result
+    else:
+        result["note"] = (
+            "Script written but not executed. Review out/tyfx_debris.ms "
+            "then call again with execute=True."
+        )
+    return result
+
+
+@_tool_result
+def atlas_crash_sparks(
+    spine_json: str,
+    *,
+    floor_nodes: list[str] | None = None,
+    execute: bool = False,
+    end_frame: int = 2400,
+    site_z: float = 5.27,
+    fps: int = 24,
+) -> dict:
+    """
+    Generate (and optionally run) the crash-sparks tyFlow event graph.
+
+    Titanium skid-block sparks over ~0.4 s from the contact frame. Writes
+    the MaxScript to out/tyfx_sparks.ms. Assign VRayLightMtl to the
+    particles manually after running for the glow effect.
+
+    Args:
+        spine_json: JSON array of [x, y] circuit spine pairs.
+        floor_nodes: Names of floor/skid-block mesh nodes. If omitted or
+            empty, emits from a point at the crash position.
+        execute: Run via bridge when True (requires ATLAS_ALLOW_MAXSCRIPT=1).
+        end_frame: Last frame of the animation range.
+        site_z: Ground elevation in scene metres.
+        fps: Frames per second (default 24).
+    """
+    import json as _json
+    from raceanim import CRASH
+    spine = [tuple(p) for p in _json.loads(spine_json)]
+    nodes = floor_nodes or []
+    path = OUT_DIR / "tyfx_sparks.ms"
+    OUT_DIR.mkdir(exist_ok=True)
+
+    result = tyfx.write_sparks_script(
+        path, nodes, spine, CRASH,
+        site_z=site_z, end_frame=end_frame, fps=fps,
+    )
+
+    if execute:
+        run_result = tyfx.run_sparks_script(_bridge(), path)
+        result["executed"] = run_result
+    else:
+        result["note"] = (
+            "Script written but not executed. Review out/tyfx_sparks.ms "
+            "then call again with execute=True. "
+            "Assign VRayLightMtl to the particles manually for the glow."
+        )
+    return result
+
+
 TOOLS = [
     atlas_max_ping,
     atlas_solar_position,
@@ -587,6 +746,9 @@ TOOLS = [
     atlas_render,
     atlas_viewport_capture,
     atlas_scene_summary,
+    atlas_tyre_smoke,
+    atlas_crash_debris,
+    atlas_crash_sparks,
 ]
 
 
