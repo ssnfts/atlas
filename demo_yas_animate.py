@@ -49,6 +49,7 @@ CUTS = raceanim.build_edit(fps=FPS, lap_seconds=raceanim.lap_time(
         SceneFrame(LAT, LON))[0].xy))
 END_FRAME = raceanim.edit_length_frames(CUTS)
 OUT = ROOT / "out"
+SCENE_FILE = OUT / "yas_race.max"
 
 b = MaxBridge()
 frame = SceneFrame(LAT, LON)
@@ -78,6 +79,7 @@ meshes = cars.cars_on_grid(origin, z=0.0)
 b.create_meshes([(m.name, m.verts, m.faces) for m in meshes],
                 chunk=20, timeout=900.0)
 print(f"built {len(meshes)} car meshes at the origin")
+print("checkpoint:", b.save_scene(str(SCENE_FILE)))
 
 b.assign_material([m.name for m in meshes if m.name.endswith("_tyres")],
                   params=PRESETS["tyre"].to_params(), name=PRESETS["tyre"].name)
@@ -180,6 +182,12 @@ for index, cut in enumerate(CUTS, start=1):
           f"{len(cam_keys):3d} keys  {shot.note}")
 
 (OUT / "shot_list.json").write_text(json.dumps(shot_log, indent=2), encoding="utf-8")
+
+# Checkpoint. 3ds Max has exited mid-session four times during this project and
+# taken the scene with it each time; the geometry is reproducible from source
+# but a rebuild costs minutes, and any manual edit is not reproducible at all.
+# save_scene verifies from disk rather than trusting saveMaxFile's return.
+print("checkpoint:", b.save_scene(str(SCENE_FILE)))
 
 # ── tyFlow: tyre smoke off the rear wheels ───────────────────────────────────
 smoke = tyfx.tyre_smoke(b, [f"car_{i + 1:02d}_tyres" for i in range(FIELD)],

@@ -242,6 +242,20 @@ class MaxBridge:
             timeout=timeout,
         )
 
+    def save_scene(self, path: str, *, use_new_file: bool = False,
+                   timeout: float = 600.0) -> dict:
+        """
+        Save the scene to ``path``, verified from disk.
+
+        Raises if the file was not rewritten. ``saveMaxFile`` reports that it
+        queued the save rather than that the bytes landed, so the reply carries
+        the size and the object count read back after the fact.
+        """
+        return self._send(
+            {"command": "save_scene", "path": path, "use_new_file": use_new_file},
+            timeout=timeout,
+        )
+
     def maxscript(self, code: str, timeout: float = 120.0) -> Any:
         """Evaluate raw MaxScript. Disabled unless ATLAS_ALLOW_MAXSCRIPT=1 in Max."""
         return self._send({"command": "maxscript", "code": code}, timeout=timeout)

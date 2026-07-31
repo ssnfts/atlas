@@ -708,6 +708,49 @@ def cmd_animation_range(params: dict) -> dict:
     }
 
 
+def cmd_save_scene(params: dict) -> dict:
+    """
+    Save the scene, and confirm from disk that it actually happened.
+
+    This exists because a session's work has now been lost twice to 3ds Max
+    exiting between builds. Everything Atlas makes is reproducible from source,
+    which is the reason that was survivable — but reproducing it costs the
+    minutes a rebuild takes, and an artist's manual edits are not reproducible
+    at all.
+
+    ``saveMaxFile`` returns true when it queued the save, not when the bytes
+    landed, so the reply carries the file's size and modification time read back
+    from disk. A save that silently did nothing is otherwise indistinguishable
+    from one that worked.
+    """
+    path = str(params.get("path") or "")
+    if not path:
+        raise ValueError("'path' is required")
+
+    folder = os.path.dirname(path)
+    if folder and not os.path.isdir(folder):
+        os.makedirs(folder, exist_ok=True)
+
+    before = os.path.getmtime(path) if os.path.isfile(path) else 0.0
+    ok = rt.saveMaxFile(path, useNewFile=bool(params.get("use_new_file", False)))
+
+    if not os.path.isfile(path):
+        raise RuntimeError(f"saveMaxFile reported {ok!r} but {path} does not exist")
+
+    after = os.path.getmtime(path)
+    if after <= before:
+        raise RuntimeError(
+            f"{path} was not rewritten (mtime unchanged). The save did not happen."
+        )
+
+    return {
+        "path": path,
+        "bytes": os.path.getsize(path),
+        "objects": int(rt.objects.count),
+        "scene": str(rt.maxFileName) or "<unsaved>",
+    }
+
+
 def cmd_vray_hdri_env(params: dict) -> dict:
     """
     Put a VRayHDRI in the environment slot, rotated to a given bearing.
@@ -1079,6 +1122,7 @@ HANDLERS = {
     "scene_list": cmd_scene_list,
     "vray_sky_setup": cmd_vray_sky_setup,
     "vray_hdri_env": cmd_vray_hdri_env,
+    "save_scene": cmd_save_scene,
     "set_keys": cmd_set_keys,
     "animation_range": cmd_animation_range,
     "assign_material": cmd_assign_material,
