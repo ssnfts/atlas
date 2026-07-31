@@ -60,8 +60,8 @@ __all__ = [
 # here rather than in a commit message so the next person to open the scene has
 # the recipe next to the object it belongs to.
 SMOKE_RECIPE = [
-    "Event 1 - Birth Flow: continuous, ~600 particles/frame, tied to the "
-    "animation range.",
+    "One Birth event per contiguous active speed-gate range; each event emits "
+    "80 particles/frame only while its range is active.",
     "Position Object: pick the *_tyres meshes; emit from the rear pair only, "
     "restricted by material ID or a selection set.",
     "Velocity: inherit the emitter's motion at ~0.15, plus 1.5 m/s outward "
@@ -69,8 +69,9 @@ SMOKE_RECIPE = [
     "sideways, not upward.",
     "Force: a light Wind at the ERA5 bearing (331 degrees at 7.34 m/s for the "
     "reference hour) so the plume drifts with the real wind.",
-    "Particle Physics or Drag: heavy drag so particles stall within ~15 m.",
-    "Scale over age + Delete by age (~2.5 s): smoke expands and dissipates.",
+    "Force: a light wind matching the recorded bearing and speed.",
+    "Scale: starts at 0.2 m; Time Test sends particles to Delete after "
+    "60 +/- 8 frames (about 2.5 seconds at 24 fps).",
     "Shading: tyPreview or export to a VRayVolumeGrid; a VRayLightMtl on "
     "sprites is the cheap alternative.",
 ]
@@ -227,6 +228,22 @@ def generate_smoke_script(
         gate_lines.append(f"    {vals}{comma}    -- frames {start}-{start + len(row) - 1}")
     gate_vals = "\n" + "\n".join(gate_lines) + "\n"
 
+    active_ranges: list[tuple[int, int]] = []
+    start: int | None = None
+    for frame, active in enumerate(speed_gate_frames):
+        if active and start is None:
+            start = frame
+        elif not active and start is not None:
+            active_ranges.append((start, frame - 1))
+            start = None
+    if start is not None:
+        active_ranges.append((start, len(speed_gate_frames) - 1))
+
+    event_calls = "\n".join(
+        f'atlasMakeSmokeEvent tf "Smoke_Birth_{i:02d}" {start_frame} {end_frame}'
+        for i, (start_frame, end_frame) in enumerate(active_ranges, start=1)
+    )
+
     header = _script_header("Tyre Smoke", {
         "flow": flow_name,
         "emitters": len(emitter_nodes),
@@ -236,78 +253,84 @@ def generate_smoke_script(
     })
 
     script = header + f"""\
+(
 -- ── 1. Ensure the tyFlow node exists ─────────────────────────────────────
 local tf = getNodeByName "{flow_name}"
-if tf == undefined then (
-    tf = tyFlow()
-    tf.name = "{flow_name}"
-)
+if tf != undefined do delete tf
+tf = tyFlow()
+tf.name = "{flow_name}"
 tf.pos = [0, 0, {site_z}]
 tf.autoThreads = true
 tf.ShowIcon = true
-tf.endFrame = {end_frame}
 
--- ── 2. Attach speed-gate array to the flow node ───────────────────────────
--- Stored as a custom attribute so it persists with the scene.
+-- ── 2. Store the speed gate for scene provenance ──────────────────────────
+-- The matching Birth ranges below are the executable binding.
 local gateArr = #({gate_vals})
 setUserProp tf "atlas_speed_gate" (gateArr as string)
 
--- ── 3. Build Event 01 — Birth + Emitter ops ──────────────────────────────
-local ev1 = tf.AddEvent()
-ev1.name = "Smoke_Birth"
-
--- Birth Flow: continuous emission, rate capped to speed gate
-local opBirth = ev1.AddOperator "tyBirthFlow"
-opBirth.Rate = 600
-opBirth.RateVariation = 0.2
-opBirth.BirthStart = 0
-opBirth.BirthEnd = {end_frame}
-
--- Position Object: emit from rear tyre surfaces
+-- ── 3. Build one event per active speed-gate range ────────────────────────
 local emitterNodes = #({node_refs})
-local opPos = ev1.AddOperator "tyPositionObject"
-opPos.PickSurface = true
-opPos.EmitterNodes = emitterNodes
 
--- Velocity: inherit emitter motion (0.15) + normal push (1.5 m/s)
-local opVel = ev1.AddOperator "tySpeed"
-opVel.Speed = 1.5
-opVel.SpeedVariation = 0.5
-opVel.InheritVelocity = 0.15
-opVel.DirectionMode = 1  -- surface normal
+fn atlasMakeSmokeEvent tf eventName firstFrame lastFrame = (
+    local ev = tf.addEvent()
+    ev.setName eventName
 
--- Wind force at ERA5 bearing
-local opForce = ev1.AddOperator "tyForce"
-local windForce = Wind()
-windForce.name = "Atlas_Wind"
-windForce.strength = {round(wind_speed_ms * 0.05, 4)}
-windForce.direction = [{wx}, {wy}, 0.0]
-opForce.ForceNodes = #(windForce)
-opForce.ForceInfluence = 1.0
+    local birth = ev.addOperator "Birth" -1
+    birth.setName "Birth"
+    birth.birthMode = 1  -- per frame; mode 0 treats birthPerFrame as a total
+    birth.BirthStart = firstFrame
+    birth.birthEndEnable = true
+    birth.BirthEnd = lastFrame
+    birth.birthPerFrame = 80
 
--- Drag: stall within ~15 m
-local opDrag = ev1.AddOperator "tyPhysicsDrag"
-opDrag.LinearDrag = 2.5
-opDrag.RotationalDrag = 1.0
+    local position = ev.addOperator "Position Object" -1
+    position.setName "Position"
+    position.objectList = emitterNodes
+    position.inheritMotion = true
+    position.inheritMotionMultiplier = 0.15
 
--- Scale over age: smoke grows x4 over its life
-local opScale = ev1.AddOperator "tyScale"
-opScale.Mode = 2  -- over life
-opScale.ScaleStart = 0.2
-opScale.ScaleEnd = 0.8
+    local speed = ev.addOperator "Speed" -1
+    speed.setName "Speed"
+    speed.magnitude = 1.5
+    speed.magnitudeVariation = 0.5
 
--- Age test: delete at 2.5 s
-local opAge = ev1.AddTest "tyTestAge"
-opAge.MaxAge = 2.5
-opAge.MaxAgeVariation = 0.3
+    local force = ev.addOperator "Force" -1
+    force.setName "Wind"
+    force.windX = {wx}
+    force.windY = {wy}
+    force.windZ = 0.0
+    force.windStrength = {round(wind_speed_ms * 0.05, 4)}
 
--- ── 4. Wire the event ────────────────────────────────────────────────────
-tf.Update()
+    local scale = ev.addOperator "Scale" -1
+    scale.setName "Initial particle scale"
+    scale.scaleX = 0.2
+    scale.scaleY = 0.2
+    scale.scaleZ = 0.2
+
+    local age = ev.addOperator "Time Test" -1
+    age.setName "Delete after 2.5 seconds"
+    age.mode = 1
+    age.Condition = 4
+    age.value = 60
+    age.variation = 8
+
+    local death = tf.addEvent()
+    death.setName (eventName + "_Delete")
+    local deleteOp = death.addOperator "Delete" -1
+    deleteOp.setName "Delete"
+    age.connect death
+)
+
+{event_calls}
+
+-- ── 4. Reset the solver after graph construction ──────────────────────────
+tf.reset_simulation()
 
 print ("Atlas: tyre smoke event graph built on " + tf.name)
 print ("  Emitters: {len(emitter_nodes)}")
 print ("  Wind: {wind_bearing_deg} deg at {wind_speed_ms} m/s")
 print ("  Active frames: {sum(speed_gate_frames)} of {len(speed_gate_frames)}")
+)
 """
     return script
 
@@ -446,7 +469,7 @@ def run_smoke_script(bridge, path: str | Path) -> dict:
         result = bridge.maxscript(code)
     except Exception as exc:
         msg = str(exc)
-        if "disabled" in msg.lower() or "maxscript" in msg.lower():
+        if "disabled" in msg.lower() and "maxscript" in msg.lower():
             raise RuntimeError(
                 "ATLAS_ALLOW_MAXSCRIPT is disabled in the bridge. "
                 "Set ATLAS_ALLOW_MAXSCRIPT=1 in the Windows environment "
@@ -466,16 +489,13 @@ def particle_count(bridge, flow_name: str, frame: int) -> int:
     because tyFlow event state is not exposed via pymxs properties.
     """
     code = f"""\
+(
 local tf = getNodeByName "{flow_name}"
 if tf == undefined then 0
 else (
-    local total = 0
-    sliderTime = {frame}
-    for i = 1 to tf.NumEvents do (
-        local ev = tf.GetEvent i
-        if ev != undefined then total += ev.NumParticles
-    )
-    total
+    tf.updateParticles {frame}
+    tf.numParticles()
+)
 )
 """
     result = bridge.maxscript(code)
@@ -644,6 +664,7 @@ def generate_debris_script(
     })
 
     script = header + f"""\
+(
 -- ── 1. tyFlow node ───────────────────────────────────────────────────────
 local tf = getNodeByName "{flow_name}"
 if tf == undefined then (
@@ -651,7 +672,6 @@ if tf == undefined then (
     tf.name = "{flow_name}"
 )
 tf.pos = [0, 0, {site_z}]
-tf.endFrame = {end_frame}
 
 -- ── 2. Event 01: Birth burst + Voronoi fragments ─────────────────────────
 local ev1 = tf.AddEvent()
@@ -716,6 +736,7 @@ tf.Update()
 print ("Atlas: crash debris event graph built on " + tf.name)
 print ("  Contact frame: {contact_frame}")
 print ("  Wing nodes: {len(wing_nodes)}")
+)
 """
     return script
 
@@ -802,7 +823,7 @@ def run_debris_script(bridge, path: str | Path) -> dict:
         result = bridge.maxscript(code)
     except Exception as exc:
         msg = str(exc)
-        if "disabled" in msg.lower() or "maxscript" in msg.lower():
+        if "disabled" in msg.lower() and "maxscript" in msg.lower():
             raise RuntimeError(
                 "ATLAS_ALLOW_MAXSCRIPT is disabled. "
                 "Set ATLAS_ALLOW_MAXSCRIPT=1 before launching 3ds Max."
@@ -858,6 +879,7 @@ opPos.Position = [{0:.1f}, {0:.1f}, {site_z:.4f}]
     })
 
     script = header + f"""\
+(
 -- ── Sparks event graph ───────────────────────────────────────────────────
 -- NOTE: Assign a VRayLightMtl to the particles manually for the glow effect.
 -- No actual lights are used — this keeps the shadow cost at zero.
@@ -868,7 +890,6 @@ if tf == undefined then (
     tf.name = "{flow_name}"
 )
 tf.pos = [0, 0, {site_z}]
-tf.endFrame = {end_frame}
 
 local ev1 = tf.AddEvent()
 ev1.name = "Sparks_Birth"
@@ -914,6 +935,7 @@ tf.Update()
 print ("Atlas: sparks event graph built on " + tf.name)
 print ("  Contact frame: {contact_frame}, burst to frame {burst_end}")
 print ("  Assign VRayLightMtl to the particles for the glow effect.")
+)
 """
     return script
 
@@ -994,7 +1016,7 @@ def run_sparks_script(bridge, path: str | Path) -> dict:
         result = bridge.maxscript(code)
     except Exception as exc:
         msg = str(exc)
-        if "disabled" in msg.lower() or "maxscript" in msg.lower():
+        if "disabled" in msg.lower() and "maxscript" in msg.lower():
             raise RuntimeError(
                 "ATLAS_ALLOW_MAXSCRIPT is disabled. "
                 "Set ATLAS_ALLOW_MAXSCRIPT=1 before launching 3ds Max."

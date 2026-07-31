@@ -114,8 +114,9 @@ def test_generate_smoke_script_starts_with_header():
     assert script.startswith("-- Atlas generated MaxScript: Tyre Smoke")
 
 
-def test_generate_smoke_script_contains_operator_names():
-    gate = [True] * 50
+def test_generate_smoke_script_uses_verified_tyflow_event_api():
+    """Generated smoke uses methods and properties verified in the live host."""
+    gate = [False, True, True, False, True]
     script = tyfx.generate_smoke_script(
         "Atlas_TyreSmoke", ["car_03_tyres"],
         speed_gate_frames=gate,
@@ -124,9 +125,43 @@ def test_generate_smoke_script_contains_operator_names():
         site_z=5.27,
         end_frame=50,
     )
-    for keyword in ("tyBirthFlow", "tyPositionObject", "tySpeed",
-                    "tyPhysicsDrag", "tyScale", "tyTestAge"):
+    for keyword in (
+        'atlasMakeSmokeEvent tf "Smoke_Birth_01" 1 2',
+        'atlasMakeSmokeEvent tf "Smoke_Birth_02" 4 4',
+        "ev.setName eventName",
+        '.addOperator "Birth" -1',
+        '.addOperator "Position Object" -1',
+        '.addOperator "Speed" -1',
+        '.addOperator "Force" -1',
+        '.addOperator "Scale" -1',
+        '.addOperator "Time Test" -1',
+        '.addOperator "Delete" -1',
+        'age.connect death',
+        'age.value = 60',
+        "birth.birthMode = 1",
+        "birth.birthEndEnable = true",
+        "position.objectList = emitterNodes",
+        "tf.reset_simulation()",
+    ):
         assert keyword in script, f"expected '{keyword}' in generated script"
+    for obsolete in ("tyBirthFlow", "tyPositionObject", "tySpeed", "tf.Update()"):
+        assert obsolete not in script
+
+
+def test_generate_smoke_script_turns_each_active_gate_range_into_a_birth_event():
+    script = tyfx.generate_smoke_script(
+        "Atlas_TyreSmoke", ["car_03_tyres"],
+        speed_gate_frames=[False, True, True, False, True, True, True, False],
+        wind_bearing_deg=0.0,
+        wind_speed_ms=1.0,
+        site_z=0.0,
+        end_frame=7,
+    )
+    assert "birth.BirthStart = firstFrame" in script
+    assert "birth.BirthEnd = lastFrame" in script
+    assert 'atlasMakeSmokeEvent tf "Smoke_Birth_01" 1 2' in script
+    assert 'atlasMakeSmokeEvent tf "Smoke_Birth_02" 4 6' in script
+    assert script.count('atlasMakeSmokeEvent tf "Smoke_Birth_') == 2
 
 
 def test_generate_smoke_script_embeds_emitter_names():
@@ -157,6 +192,37 @@ def test_generate_smoke_script_wind_direction_is_unit_vector():
     # bearing 0+180=180 → sin(180°)=0, cos(180°)=-1
     assert "0.0" in script       # wx ≈ 0
     assert "-1.0" in script      # wy = -1
+
+
+def test_generated_event_graph_scripts_scope_their_local_declarations():
+    """MaxScript rejects ``local`` declarations at top level."""
+    smoke = tyfx.generate_smoke_script(
+        "Atlas_TyreSmoke", ["car_01_tyres"],
+        speed_gate_frames=[True] * 10,
+        wind_bearing_deg=0.0,
+        wind_speed_ms=5.0,
+        site_z=0.0,
+        end_frame=10,
+    )
+    debris = tyfx.generate_debris_script(
+        "Atlas_Debris", ["car_03"],
+        contact_frame=10,
+        car_speed_ms=50.0,
+        yaw_rate_degs=100.0,
+        site_z=0.0,
+        end_frame=20,
+    )
+    sparks = tyfx.generate_sparks_script(
+        "Atlas_Sparks", ["car_03"],
+        contact_frame=10,
+        car_speed_ms=50.0,
+        site_z=0.0,
+        end_frame=20,
+    )
+    for script in (smoke, debris, sparks):
+        assert "\n(\n" in script
+        assert script.rstrip().endswith(")")
+        assert ".endFrame" not in script
 
 
 # ── write_smoke_script ────────────────────────────────────────────────────────
@@ -217,6 +283,17 @@ def test_run_smoke_script_raises_on_disabled_flag(tmp_path):
         tyfx.run_smoke_script(b, script)
 
 
+def test_run_smoke_script_preserves_a_host_compile_error(tmp_path):
+    script = tmp_path / "tyfx_smoke.ms"
+    script.write_text("local tf = undefined", encoding="utf-8")
+    b = _mock_bridge()
+    b.maxscript.side_effect = Exception(
+        "RuntimeError: MAXScript exception raised. -- Compile error: no local declarations at top level"
+    )
+    with pytest.raises(Exception, match="Compile error"):
+        tyfx.run_smoke_script(b, script)
+
+
 def test_run_smoke_script_success(tmp_path):
     script = tmp_path / "tyfx_smoke.ms"
     script.write_text("print 'hello'", encoding="utf-8")
@@ -246,6 +323,9 @@ def test_particle_count_query_contains_flow_name():
     call_args = b.maxscript.call_args[0][0]
     assert "MyFlow" in call_args
     assert "55" in call_args
+    assert call_args.startswith("(\n")
+    assert "tf.updateParticles 55" in call_args
+    assert "tf.numParticles()" in call_args
 
 
 # ── contact_frame_for ─────────────────────────────────────────────────────────
