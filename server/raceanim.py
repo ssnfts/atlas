@@ -56,11 +56,14 @@ __all__ = [
     "speed_profile",
     "lap_time",
     "distance_at",
+    "time_at_distance",
     "attitude_at",
     "curvature_radius",
     "CrashSpec",
     "CRASH",
     "crash_state",
+    "crash_pose",
+    "crash_pose_at_time",
     "Cut",
     "build_edit",
     "edit_length_frames",
@@ -305,6 +308,30 @@ def distance_at(spine, seconds: float, closed: bool = True) -> float:
     return travelled
 
 
+def time_at_distance(spine, distance_m: float, closed: bool = True) -> float:
+    """Inverse of :func:`distance_at` for one profiled circuit lap.
+
+    This walks the same segment durations as ``distance_at`` rather than using
+    a mean lap speed, which keeps an incident pinned to the braking/acceleration
+    timing that generated the car keys.
+    """
+    total = lap_length(spine, closed)
+    if total <= 1e-9:
+        return 0.0
+    target = distance_m % total
+    speeds = speed_profile(spine, closed)
+    elapsed = 0.0
+    for i, a in enumerate(spine):
+        b = spine[(i + 1) % len(spine)]
+        segment = math.dist(a, b)
+        mean_speed = max(0.5 * (speeds[i] + speeds[(i + 1) % len(spine)]), 1e-3)
+        if target <= segment:
+            return elapsed + (target / max(segment, 1e-9)) * (segment / mean_speed)
+        target -= segment
+        elapsed += segment / mean_speed
+    return elapsed
+
+
 def attitude_at(spine, distance: float, closed: bool = True) -> tuple[float, float]:
     """
     Body roll and pitch at a point on the lap, in degrees.
@@ -517,7 +544,10 @@ class CrashSpec:
 
 
 # Lap 0.69, which is inside the 11_crash_wide window (0.646-0.742).
-CRASH = CrashSpec(at_distance_m=3650.0)
+# Live Max sampling at contact frame 1388 puts car_01 within 3.1 m of the
+# incident point; the old slot 3 default was a stale blocking choice.  Slots
+# are zero-based here, so car_01 is spinner slot 0.
+CRASH = CrashSpec(at_distance_m=3650.0, spinner_slot=0)
 
 
 def crash_state(spec: CrashSpec, t_since_contact: float, base_heading: float):
@@ -560,6 +590,55 @@ def crash_state(spec: CrashSpec, t_since_contact: float, base_heading: float):
     height = spec.launch_height_m * 4.0 * air * (1.0 - air)
 
     return lateral, yaw, roll, pitch, height
+
+
+def crash_pose(clean_pose: tuple[float, float, float, float, float],
+               contact_pose: tuple[float, float, float, float, float],
+               spec: CrashSpec, t_since_contact: float, *,
+               slide_distance_m: float = 72.0
+               ) -> tuple[float, float, float, float, float, float]:
+    """Resolve the spinner's world pose relative to one measured contact pose.
+
+    Before contact it follows the clean lap, including the small anticipation
+    offset.  From contact onward it is deliberately detached from the lap: it
+    slides a finite distance along the *contact* tangent and then remains at
+    rest.  That is the shared source for Max car keys and crash-camera targets,
+    so neither can silently resume the clean racing line after the impact.
+
+    Returns ``(x, y, heading, roll, pitch, height_m)``.  ``height_m`` is added
+    to the graded site Z by the caller.
+    """
+    lateral, yaw, roll, pitch, height = crash_state(
+        spec, t_since_contact, contact_pose[2])
+
+    if t_since_contact < 0.0:
+        x, y, heading, base_roll, base_pitch = clean_pose
+        slide = 0.0
+    else:
+        x, y, heading, base_roll, base_pitch = contact_pose
+        duration = spec.impact_s + spec.settle_s
+        progress = min(t_since_contact / duration, 1.0)
+        # Strong initial travel that decays into a stop, instead of coasting at
+        # one speed or moving in a single final key interval.
+        slide = slide_distance_m * (1.0 - (1.0 - progress) ** 2)
+
+    heading_radians = math.radians(heading)
+    # Atlas heading is clockwise from +Y: forward=(sin h, cos h), left=(cos h,
+    # -sin h).  Keep both offsets in that local contact frame.
+    x += math.sin(heading_radians) * slide + math.cos(heading_radians) * lateral
+    y += math.cos(heading_radians) * slide - math.sin(heading_radians) * lateral
+    return x, y, heading + yaw, base_roll + roll, base_pitch + pitch, height
+
+
+def crash_pose_at_time(spine, seconds: float, spec: CrashSpec = CRASH, *,
+                       gap_s: float = 0.9
+                       ) -> tuple[float, float, float, float, float, float]:
+    """Resolve the spinner pose at a timeline time using the profiled lap."""
+    count = spec.spinner_slot + 1
+    contact_s = time_at_distance(spine, spec.at_distance_m) + spec.spinner_slot * gap_s
+    clean = field_at_time(spine, seconds, count=count, gap_s=gap_s)[spec.spinner_slot]
+    contact = field_at_time(spine, contact_s, count=count, gap_s=gap_s)[spec.spinner_slot]
+    return crash_pose(clean, contact, spec, seconds - contact_s)
 
 
 @dataclass(frozen=True)
@@ -696,6 +775,31 @@ def _trackside(spine, lap_fraction, side, dist, up, site_z, fov=52.0):
             (x, y, site_z + 0.7), fov)
 
 
+def _crash_wide_camera(spine, seconds: float, site_z: float, spec: CrashSpec):
+    """Aerial wide that tracks the spinner through anticipation and slide."""
+    x, y, heading, _, _, height = crash_pose_at_time(spine, seconds, spec)
+    angle = math.radians(heading)
+    forward = math.sin(angle), math.cos(angle)
+    left = math.cos(angle), -math.sin(angle)
+    position = (x - forward[0] * 62.0 + left[0] * 14.0,
+                y - forward[1] * 62.0 + left[1] * 14.0,
+                site_z + 11.0)
+    return position, (x, y, site_z + 0.6 + height), 40.0
+
+
+def _crash_tight_camera(spine, seconds: float, site_z: float, spec: CrashSpec):
+    """Locked-off trackside camera; only its target pans with the incident."""
+    count = spec.spinner_slot + 1
+    contact_s = time_at_distance(spine, spec.at_distance_m) + spec.spinner_slot * 0.9
+    anchor = field_at_time(spine, contact_s, count=count)[spec.spinner_slot]
+    x, y, heading, _, _ = anchor
+    angle = math.radians(heading)
+    left = math.cos(angle), -math.sin(angle)
+    pose = crash_pose_at_time(spine, seconds, spec)
+    position = (x + left[0] * 21.0, y + left[1] * 21.0, site_z + 1.6)
+    return position, (pose[0], pose[1], site_z + 0.6 + pose[5]), 26.0
+
+
 def _orbit(spine, lap_fraction, radius, up, turns, site_z, fov=40.0):
     """A drone circling the leader as it passes."""
     x, y, _ = _lead(spine, lap_fraction)
@@ -778,7 +882,9 @@ SHOTS: list[Shot] = [
 ]
 
 
-def camera_for(shot: Shot, spine, lap_fraction: float, site_z: float):
+def camera_for(shot: Shot, spine, lap_fraction: float, site_z: float, *,
+               lap_seconds: float | None = None,
+               crash_spec: CrashSpec = CRASH):
     """
     Resolve a shot to ``(position, target, fov)`` at one moment.
 
@@ -791,6 +897,13 @@ def camera_for(shot: Shot, spine, lap_fraction: float, site_z: float):
     below-site guard caught only at build time. A shot should not have to know
     where it sits in the lap.
     """
+    if shot.name in {"11_crash_wide", "12_crash_tight"}:
+        if lap_seconds is None:
+            lap_seconds = time_at_distance(spine, lap_fraction * lap_length(spine))
+        if shot.name == "11_crash_wide":
+            return _crash_wide_camera(spine, lap_seconds, site_z, crash_spec)
+        return _crash_tight_camera(spine, lap_seconds, site_z, crash_spec)
+
     span = shot.lap_to - shot.lap_from
     u = 0.0 if span <= 0 else max(0.0, min(1.0, (lap_fraction - shot.lap_from) / span))
     return shot.at(spine, lap_fraction, site_z, u)

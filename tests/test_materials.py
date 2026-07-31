@@ -132,7 +132,8 @@ def test_parameters_are_names_the_live_host_has():
     """
     verified = {
         "diffuse", "reflection", "reflection_glossiness",
-        "reflection_ior", "reflection_metalness",
+        "reflection_ior", "reflection_metalness", "coat_amount", "coat_color",
+        "coat_glossiness", "coat_ior", "coat_darkening",
     }
     for spec in PRESETS.values():
         assert set(spec.to_params()) <= verified, f"{spec.name} sends an unverified name"
@@ -173,6 +174,15 @@ def test_rougher_materials_are_less_glossy_than_smoother_ones():
 def test_colour_wrappers_are_the_shape_the_bridge_rebuilds():
     params = PRESETS["brick"].to_params()
     assert params["diffuse"] == {"__color__": [138, 78, 60]}
+
+
+def test_car_body_uses_the_live_verified_clearcoat_controls():
+    """Moving bodywork needs scalar coat, not a world-space texture that swims."""
+    params = PRESETS["car_body"].to_params()
+    assert params["coat_amount"] > 0.0
+    assert params["coat_glossiness"] > params["reflection_glossiness"]
+    assert params["coat_ior"] == pytest.approx(1.52)
+    assert params["coat_color"] == {"__color__": [255, 255, 255]}
 
 
 # ── Grouping ──────────────────────────────────────────────────────────────────

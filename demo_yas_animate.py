@@ -125,8 +125,15 @@ car_keys: dict[int, list[dict]] = {slot: [] for slot in range(FIELD)}
 for f in sample_frames:
     places = raceanim.field_at_time(spine, lap_seconds_at(f), count=FIELD)
     for slot, (x, y, heading, roll, pitch) in enumerate(places):
+        height = 0.0
+        if slot == raceanim.CRASH.spinner_slot:
+            # The incident must use the same pose that drives its cameras and
+            # tyFlow contact frame.  Continuing this car's clean lap after the
+            # crash makes a plausible-looking but physically contradictory cut.
+            x, y, heading, roll, pitch, height = raceanim.crash_pose_at_time(
+                spine, lap_seconds_at(f))
         quat = raceanim.orientation_quat(heading, pitch, roll)
-        car_keys[slot].append({"frame": f, "pos": [x, y, SITE_Z],
+        car_keys[slot].append({"frame": f, "pos": [x, y, SITE_Z + height],
                                "quat": list(quat)})
 
 for slot in range(FIELD):
@@ -156,7 +163,7 @@ for index, cut in enumerate(CUTS, start=1):
     start_f, end_f = cut.start_frame, cut.end_frame
 
     first_pos, first_tgt, fov = raceanim.camera_for(
-        shot, spine, shot.lap_from, SITE_Z)
+        shot, spine, shot.lap_from, SITE_Z, lap_seconds=lap_seconds_at(start_f))
     build_camera(b, position=first_pos, target=first_tgt, camera_name=name,
                  fov_degrees=fov, exposure=exposure_for_altitude(SUN_ALT))
 
@@ -165,7 +172,8 @@ for index, cut in enumerate(CUTS, start=1):
     for s in range(steps):
         f = start_f + round((end_f - start_f) * s / (steps - 1))
         t = shot.lap_from + (shot.lap_to - shot.lap_from) * s / (steps - 1)
-        pos, tgt, _ = raceanim.camera_for(shot, spine, t, SITE_Z)
+        pos, tgt, _ = raceanim.camera_for(
+            shot, spine, t, SITE_Z, lap_seconds=lap_seconds_at(f))
         if pos[2] <= SITE_Z:
             raise SystemExit(f"{name} at frame {f}: camera below the graded site")
         cam_keys.append({"frame": f, "pos": list(pos)})

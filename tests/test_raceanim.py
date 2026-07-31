@@ -179,6 +179,64 @@ def test_body_rights_itself_as_it_slows():
     assert roll_early > roll_late
 
 
+def test_crash_pose_stops_at_the_contact_tangent_after_settling():
+    """The crash car must never return to the clean lap after the incident."""
+    spec = ra.CrashSpec(at_distance_m=100.0, settle_s=2.0)
+    clean = (900.0, 400.0, 13.0, 0.0, 0.0)
+    contact = (100.0, 200.0, 90.0, 0.0, 0.0)
+
+    before = ra.crash_pose(clean, contact, spec, -spec.tell_s - 0.01,
+                           slide_distance_m=72.0)
+    settled = ra.crash_pose(clean, contact, spec, spec.impact_s + spec.settle_s,
+                            slide_distance_m=72.0)
+    later = ra.crash_pose(clean, contact, spec, spec.impact_s + spec.settle_s + 5.0,
+                          slide_distance_m=72.0)
+
+    assert before == pytest.approx((*clean, 0.0))
+    assert later == pytest.approx(settled)
+    # Heading 90 points along +X in Atlas coordinates.  The finite slide is
+    # along that contact tangent, rather than the clean lap 800 m away.
+    assert settled[0] == pytest.approx(172.0)
+    assert settled[1] == pytest.approx(200.0 - 10.8)
+    assert settled[2] == pytest.approx(90.0 - spec.spin_degrees)
+
+
+def test_crash_wide_targets_the_same_settled_pose_as_the_spinner():
+    """Shot 11 must follow the crash, not the clean lap after contact."""
+    spine = _oval()
+    spec = ra.CrashSpec(at_distance_m=ra.lap_length(spine) * 0.6, settle_s=2.0)
+    contact_s = ra.time_at_distance(spine, spec.at_distance_m)
+    current_s = contact_s + spec.impact_s + spec.settle_s
+    lap_fraction = ra.distance_at(spine, current_s) / ra.lap_length(spine)
+    shot = next(shot for shot in ra.SHOTS if shot.name == "11_crash_wide")
+
+    pose = ra.crash_pose_at_time(spine, current_s, spec)
+    _, target, _ = ra.camera_for(shot, spine, lap_fraction, 5.27,
+                                 lap_seconds=current_s, crash_spec=spec)
+
+    assert target == pytest.approx((pose[0], pose[1], 5.27 + 0.6 + pose[5]))
+
+
+def test_crash_tight_is_locked_off_but_pans_to_the_spinner():
+    """The tight angle is static by design, while its target follows the slide."""
+    spine = _oval()
+    spec = ra.CrashSpec(at_distance_m=ra.lap_length(spine) * 0.6, settle_s=2.0)
+    contact_s = ra.time_at_distance(spine, spec.at_distance_m)
+    shot = next(shot for shot in ra.SHOTS if shot.name == "12_crash_tight")
+    first_s = contact_s
+    last_s = contact_s + spec.impact_s + spec.settle_s
+
+    first = ra.camera_for(shot, spine, 0.7, 5.27,
+                          lap_seconds=first_s, crash_spec=spec)
+    last = ra.camera_for(shot, spine, 0.7, 5.27,
+                         lap_seconds=last_s, crash_spec=spec)
+    pose = ra.crash_pose_at_time(spine, last_s, spec)
+
+    assert first[0] == pytest.approx(last[0])
+    assert math.dist(first[1], last[1]) > 20.0
+    assert last[1] == pytest.approx((pose[0], pose[1], 5.27 + 0.6 + pose[5]))
+
+
 def test_the_cut_list_covers_the_crash_from_two_angles():
     crash = [s for s in ra.SHOTS if "crash" in s.name]
     assert len(crash) == 2

@@ -59,16 +59,30 @@ class MaterialSpec:
     reflection_ior: float = 1.5
     reflection_metalness: float = 0.0
     note: str = ""
+    coat_amount: float = 0.0
+    coat_color: tuple[int, int, int] = (255, 255, 255)
+    coat_glossiness: float = 1.0
+    coat_ior: float = 1.6
+    coat_darkening: float = 0.0
 
     def to_params(self) -> dict:
         """Bridge-ready parameter dict, using colour wrappers the handler rebuilds."""
-        return {
+        params = {
             "diffuse": {"__color__": list(self.diffuse)},
             "reflection": {"__color__": list(self.reflection)},
             "reflection_glossiness": self.reflection_glossiness,
             "reflection_ior": self.reflection_ior,
             "reflection_metalness": self.reflection_metalness,
         }
+        if self.coat_amount > 0.0:
+            params.update({
+                "coat_amount": self.coat_amount,
+                "coat_color": {"__color__": list(self.coat_color)},
+                "coat_glossiness": self.coat_glossiness,
+                "coat_ior": self.coat_ior,
+                "coat_darkening": self.coat_darkening,
+            })
+        return params
 
 
 # Values are plausible mid-range approximations for massing, not measured
@@ -149,11 +163,15 @@ PRESETS: dict[str, MaterialSpec] = {
             "(128,130,136) at 0.88 was not wrong because it was glossy; it was "
             "wrong because a 50% grey reflection re-broadcasts the whole sky. "
             "Dark reflection, high gloss: a highlight rather than a floodlight.\n\n"
-            "A true two-layer clearcoat (VRayMtl's coat_* parameters) would be "
-            "better still and is NOT set here, because those names have not "
-            "been read off this host and this project does not guess V-Ray "
-            "parameter names."
+            "The second, clean coat is a physical layer rather than a bitmap. "
+            "All five scalar `coat_*` names were read from the live V-Ray 7 "
+            "material before this preset used them; the coat is 0.80 strength, "
+            "neutral, 0.96 gloss and IOR 1.52."
         ),
+        coat_amount=0.80,
+        coat_glossiness=0.96,
+        coat_ior=1.52,
+        coat_darkening=0.0,
     ),
     "line_paint": MaterialSpec(
         "atlas_line_paint", (232, 231, 226), (18, 18, 18), 0.30, 1.5,
