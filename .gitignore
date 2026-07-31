@@ -37,3 +37,6 @@ desktop.ini
 
 # Downloaded HDRIs — fetched on demand by server/skydome.py, not source.
 assets/hdri/
+out/lap/
+out/*.png
+out/yas_raceway.json

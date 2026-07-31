@@ -118,6 +118,65 @@ def _box(cx, cy, cz, sx, sy, sz):
     return v, f
 
 
+def _section(half_width: float, z_low: float, z_high: float, *, corner: float = 0.35,
+             points: int = 12):
+    """
+    One cross-section of the bodywork, as a rounded rectangle in the XZ plane.
+
+    Rounded rather than square because a single-seater has no sharp horizontal
+    edges along its flanks — the monocoque is a continuous curved surface, and
+    the giveaway of a box-built proxy is the hard highlight running the length
+    of it. ``corner`` is the fillet as a fraction of the smaller half-dimension.
+    """
+    cz = (z_low + z_high) / 2.0
+    hz = (z_high - z_low) / 2.0
+    r = corner * min(half_width, hz)
+    out = []
+    for i in range(points):
+        a = 2.0 * math.pi * i / points
+        cos_a, sin_a = math.cos(a), math.sin(a)
+        # Superellipse-ish: a rectangle with rounded corners.
+        x = (half_width - r) * (1.0 if cos_a > 0 else -1.0) * min(abs(cos_a) * 1.6, 1.0)
+        z = (hz - r) * (1.0 if sin_a > 0 else -1.0) * min(abs(sin_a) * 1.6, 1.0)
+        out.append((x + r * cos_a, cz + z + r * sin_a))
+    return out
+
+
+def _loft(stations, *, close_ends: bool = True):
+    """
+    Skin a series of cross-sections into a surface.
+
+    ``stations`` is a list of ``(y, section)`` where each section is the same
+    length. Wound so normals face outward, and capped at both ends so the result
+    is a closed solid whose signed volume can be checked — the invariant that
+    caught the tyres being inside-out.
+    """
+    verts: list[tuple[float, float, float]] = []
+    for y, section in stations:
+        for x, z in section:
+            verts.append((x, y, z))
+
+    n = len(stations[0][1])
+    faces: list[tuple[int, int, int]] = []
+    # Sections are generated counter-clockwise in the XZ plane and stacked along
+    # +Y, so this winding is the one that puts normals outward. The tyres taught
+    # the lesson: every dimension can be exact while the surface is inside-out,
+    # and the only cheap check is the sign of the closed volume.
+    for s in range(len(stations) - 1):
+        a, b = s * n, (s + 1) * n
+        for i in range(n):
+            j = (i + 1) % n
+            faces += [(a + i, b + j, b + i), (a + i, a + j, b + j)]
+
+    if close_ends:
+        first = 0
+        last = (len(stations) - 1) * n
+        for i in range(1, n - 1):
+            faces.append((first, first + i, first + i + 1))
+            faces.append((last, last + i + 1, last + i))
+    return verts, faces
+
+
 def _revolve(cx, cy, cz, profile, *, segments=48):
     """
     Revolve a ``(radius, offset)`` profile about the wheel's axle (the X axis).
@@ -229,28 +288,75 @@ def car_mesh(name: str, spec: CarSpec = F1_2022, *, z: float = 0.0) -> Mesh:
         faces.extend((a + base, b + base, c + base) for a, b, c in f)
 
     hl = spec.length / 2.0
-    tyre_r = spec.tyre_diameter / 2.0
-    axle_z = z + tyre_r
 
-    # Floor and survival cell, sitting between the axles.
-    add(*_box(0.0, 0.0, z + 0.09, spec.body_width * 1.25, spec.wheelbase, 0.10))
-    add(*_box(0.0, -0.25, z + 0.34, spec.body_width, 2.30, 0.44))
+    # ── monocoque ────────────────────────────────────────────────────────────
+    # Stations from the nose tip back to the gearbox: (y, half-width, floor,
+    # deck). The car narrows and drops toward the nose and tapers hard behind
+    # the airbox — that coke-bottle plan and the falling deck line are the two
+    # things that make a shape read as a single-seater rather than as a wedge.
+    body_stations = [
+        (hl,          0.030, z + 0.24, z + 0.30),   # nose tip
+        (hl - 0.55,   0.075, z + 0.20, z + 0.36),
+        (hl - 1.20,   0.150, z + 0.12, z + 0.44),
+        (hl - 1.85,   0.260, z + 0.07, z + 0.52),   # front bulkhead
+        (hl - 2.45,   0.330, z + 0.06, z + 0.60),   # cockpit opening
+        (hl - 3.05,   0.360, z + 0.06, z + 0.66),
+        (hl - 3.55,   0.345, z + 0.06, z + 0.86),   # airbox shoulder
+        (hl - 4.15,   0.290, z + 0.07, z + 0.74),
+        (hl - 4.75,   0.215, z + 0.08, z + 0.60),   # coke-bottle waist
+        (hl - 5.25,   0.160, z + 0.10, z + 0.48),
+        (-hl + 0.10,  0.130, z + 0.12, z + 0.42),   # gearbox
+    ]
+    add(*_loft([(y, _section(hw, lo, hi)) for y, hw, lo, hi in body_stations]))
 
-    # Nose, tapering forward to the front wing.
-    add(*_box(0.0, hl - 1.05, z + spec.nose_height, 0.32, 1.70, 0.22))
+    # ── floor ────────────────────────────────────────────────────────────────
+    floor_stations = [
+        (hl - 1.90, 0.34, z + 0.045, z + 0.075),
+        (hl - 3.10, 0.62, z + 0.040, z + 0.075),
+        (hl - 4.60, 0.62, z + 0.040, z + 0.075),
+        (-hl + 0.55, 0.44, z + 0.055, z + 0.150),   # diffuser ramp
+    ]
+    add(*_loft([(y, _section(hw, lo, hi, corner=0.2)) for y, hw, lo, hi in floor_stations]))
 
-    # Front and rear wings: the two elements that read hardest in silhouette.
-    add(*_box(0.0, hl - 0.14, z + 0.11, spec.width, 0.55, 0.10))
-    add(*_box(0.0, -hl + 0.28, z + 0.78, spec.width * 0.82, 0.42, 0.26))
-    add(*_box(0.0, -hl + 0.30, z + 0.30, 0.70, 0.70, 0.44))   # gearbox/diffuser
-
-    # Sidepods.
+    # ── sidepods, with the undercut ──────────────────────────────────────────
     for side in (-1.0, 1.0):
-        add(*_box(side * 0.62, -0.15, z + 0.34, 0.44, 1.85, 0.46))
+        pod = [
+            (hl - 2.55, 0.02, z + 0.24, z + 0.30),
+            (hl - 2.95, 0.26, z + 0.20, z + 0.62),   # inlet mouth
+            (hl - 3.60, 0.30, z + 0.17, z + 0.64),
+            (hl - 4.35, 0.22, z + 0.15, z + 0.52),
+            (hl - 5.05, 0.10, z + 0.14, z + 0.38),   # tapering to the coke bottle
+        ]
+        add(*_loft([(y, [(x + side * 0.42, zz) for x, zz in
+                         _section(hw, lo, hi, corner=0.45)])
+                    for y, hw, lo, hi in pod]))
 
-    # Airbox and roll hoop, then the halo as a single blade.
-    add(*_box(0.0, -0.62, z + spec.height - 0.14, 0.36, 0.95, 0.34))
-    add(*_box(0.0, 0.18, z + spec.height - 0.06, 0.60, 0.06, 0.16))
+    # ── front wing: main plane plus endplates ────────────────────────────────
+    add(*_box(0.0, hl - 0.31, z + 0.105, spec.width, 0.62, 0.055))
+    add(*_box(0.0, hl - 0.52, z + 0.165, spec.width * 0.86, 0.30, 0.045))
+    for side in (-1.0, 1.0):
+        add(*_box(side * spec.width * 0.49, hl - 0.42, z + 0.17, 0.030, 0.80, 0.30))
+
+    # ── rear wing: two planes and endplates, on a swan-neck pylon ────────────
+    add(*_box(0.0, -hl + 0.34, z + 0.86, spec.width * 0.72, 0.34, 0.045))
+    add(*_box(0.0, -hl + 0.26, z + 0.99, spec.width * 0.72, 0.26, 0.040))
+    for side in (-1.0, 1.0):
+        add(*_box(side * spec.width * 0.36, -hl + 0.30, z + 0.90, 0.028, 0.62, 0.34))
+    add(*_box(0.0, -hl + 0.42, z + 0.66, 0.10, 0.16, 0.34))
+
+    # ── halo ─────────────────────────────────────────────────────────────────
+    # Three members: the front stay and two side blades sweeping back.
+    add(*_box(0.0, hl - 2.28, z + 0.72, 0.055, 0.055, 0.24))
+    for side in (-1.0, 1.0):
+        add(*_box(side * 0.31, hl - 2.70, z + 0.88, 0.045, 0.86, 0.05))
+        add(*_box(side * 0.30, hl - 3.13, z + 0.80, 0.045, 0.05, 0.20))
+
+    # ── airbox ───────────────────────────────────────────────────────────────
+    add(*_loft([
+        (hl - 3.28, _section(0.105, z + 0.80, z + 0.96, corner=0.5)),
+        (hl - 3.52, _section(0.150, z + 0.78, z + 0.98, corner=0.5)),
+        (hl - 3.95, _section(0.130, z + 0.72, z + 0.86, corner=0.5)),
+    ]))
 
     mesh = Mesh(verts=verts, faces=faces, name=name)
     mesh.metadata.update({

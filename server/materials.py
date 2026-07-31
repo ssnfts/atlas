@@ -124,12 +124,16 @@ PRESETS: dict[str, MaterialSpec] = {
         note="machined aluminium wheel face; metalness 1.0 so diffuse is ignored",
     ),
     "car_body": MaterialSpec(
-        "atlas_car_body", (28, 30, 36), (128, 130, 136), 0.88, 1.6,
+        "atlas_car_body", (28, 30, 36), (46, 47, 50), 0.74, 1.6,
         note=(
-            "generic single-seater bodywork — no livery, deliberately. A dark "
-            "clearcoat with a tight specular is what makes a car read as a car "
-            "at a distance: the highlight travels along the bodywork as the "
-            "camera moves, which no diffuse colour reproduces."
+            "generic single-seater bodywork — no livery, deliberately.\n\n"
+            "The reflection is deliberately modest. A first pass at (128,130,136) "
+            "and 0.88 glossiness turned a scarlet car into glowing plastic: a "
+            "50% grey mirror over a saturated diffuse re-broadcasts the whole "
+            "sky back at the lens, and the result reads as emissive rather than "
+            "painted. Modern race bodywork is a satin wrap, not a show-car "
+            "clearcoat — a weaker, slightly rougher reflection keeps the "
+            "travelling highlight that says 'car' without the neon."
         ),
     ),
     "line_paint": MaterialSpec(
