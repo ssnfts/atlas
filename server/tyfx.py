@@ -842,33 +842,24 @@ def generate_sparks_script(
     car_speed_ms: float,
     site_z: float,
     end_frame: int,
+    contact_position: tuple[float, float] = (0.0, 0.0),
 ) -> str:
     """
     Return MaxScript that builds the sparks event graph.
 
-    Titanium skid-block sparks: burst over ~0.4 s from contact, heavy drag,
-    gravity on, small and bright. VRayLightMtl assigned manually (noted in
-    a comment) — no actual lights, no shadow cost.
+    Titanium skid-block sparks: burst over ~0.4 s from contact, speed scaled
+    to the impact, gravity on, small and bright. VRayLightMtl assigned
+    manually (noted in a comment) — no actual lights, no shadow cost.
 
-    Falls back to a point emitter at the site origin if ``floor_nodes`` is
-    empty, so sparks never block the crash render.
+    A small hidden sphere at ``contact_position`` provides a stable source.
+    ``floor_nodes`` is retained for a future PhysX collision pass; it is not
+    used as an emitter because that would scatter sparks across a whole slab.
     """
     burst_end = contact_frame + 10  # 10 frames @ 24 fps ≈ 0.42 s
+    scatter_speed = round(min(12.0, max(5.0, car_speed_ms * 0.1)), 2)
 
-    if floor_nodes:
-        node_refs = ", ".join(f'getNodeByName "{n}"' for n in floor_nodes)
-        emitter_block = f"""\
-local floorNodes = #({node_refs})
-local opPos = ev1.AddOperator "tyPositionObject"
-opPos.EmitterNodes = floorNodes
-opPos.PickSurface = true
-"""
-    else:
-        emitter_block = f"""\
--- No floor nodes provided; emitting from the crash point.
-local opPos = ev1.AddOperator "tyPositionObject"
-opPos.Position = [{0:.1f}, {0:.1f}, {site_z:.4f}]
-"""
+    contact_x, contact_y = contact_position
+    source_name = f"{flow_name}_Source"
 
     header = _script_header("Crash Sparks", {
         "flow": flow_name,
@@ -885,52 +876,66 @@ opPos.Position = [{0:.1f}, {0:.1f}, {site_z:.4f}]
 -- No actual lights are used — this keeps the shadow cost at zero.
 
 local tf = getNodeByName "{flow_name}"
-if tf == undefined then (
-    tf = tyFlow()
-    tf.name = "{flow_name}"
-)
+if tf != undefined do delete tf
+tf = tyFlow()
+tf.name = "{flow_name}"
 tf.pos = [0, 0, {site_z}]
 
-local ev1 = tf.AddEvent()
-ev1.name = "Sparks_Birth"
+local oldSource = getNodeByName "{source_name}"
+if oldSource != undefined do delete oldSource
+local source = Sphere radius:0.02 segments:8
+source.name = "{source_name}"
+source.pos = [{contact_x}, {contact_y}, {site_z}]
+source.isHidden = true
+
+local ev1 = tf.addEvent()
+ev1.setName "Sparks_Birth"
 
 -- Birth burst over contact window (~0.4 s)
-local opBirth = ev1.AddOperator "tyBirthFlow"
-opBirth.Rate = 800
-opBirth.BirthStart = {contact_frame}
-opBirth.BirthEnd = {burst_end}
+local birth = ev1.addOperator "Birth" -1
+birth.setName "Birth"
+birth.birthMode = 1
+birth.BirthStart = {contact_frame}
+birth.birthEndEnable = true
+birth.BirthEnd = {burst_end}
+birth.birthPerFrame = 60
 
-{emitter_block}
+local position = ev1.addOperator "Position Object" -1
+position.setName "Crash contact"
+position.objectList = #(source)
 -- Velocity: forward + upward scatter with wide spread
-local opVel = ev1.AddOperator "tySpeed"
-opVel.Speed = 3.0
-opVel.SpeedVariation = 2.0
-opVel.InheritVelocity = {round(car_speed_ms * 0.9 / max(car_speed_ms, 1), 4)}
-opVel.DirectionMode = 4  -- random scatter
+local speed = ev1.addOperator "Speed" -1
+speed.setName "Scatter"
+speed.magnitude = {scatter_speed}
+speed.magnitudeVariation = 3.0
 
 -- Gravity
-local opGrav = ev1.AddOperator "tyForce"
-local grav = Gravity()
-grav.name = "Atlas_Sparks_Gravity"
-grav.strength = 1.0
-opGrav.ForceNodes = #(grav)
-
--- Heavy drag: sparks decelerate fast
-local opDrag = ev1.AddOperator "tyPhysicsDrag"
-opDrag.LinearDrag = 4.5
+local force = ev1.addOperator "Force" -1
+force.setName "Gravity"
+force.gravityStrength = -1
 
 -- Scale: small and constant
-local opScale = ev1.AddOperator "tyScale"
-opScale.Mode = 0  -- constant
-opScale.ScaleStart = 0.03
-opScale.ScaleEnd = 0.03
+local scale = ev1.addOperator "Scale" -1
+scale.setName "Spark size"
+scale.scaleX = 0.03
+scale.scaleY = 0.03
+scale.scaleZ = 0.03
 
 -- Delete after 0.3 s
-local opAge = ev1.AddTest "tyTestAge"
-opAge.MaxAge = 0.3
-opAge.MaxAgeVariation = 0.1
+local age = ev1.addOperator "Time Test" -1
+age.setName "Delete after 0.33 seconds"
+age.mode = 1
+age.Condition = 4
+age.value = 8
+age.variation = 2
 
-tf.Update()
+local death = tf.addEvent()
+death.setName "Sparks_Delete"
+local deleteOp = death.addOperator "Delete" -1
+deleteOp.setName "Delete"
+age.connect death
+
+tf.reset_simulation()
 
 print ("Atlas: sparks event graph built on " + tf.name)
 print ("  Contact frame: {contact_frame}, burst to frame {burst_end}")
@@ -969,6 +974,7 @@ def write_sparks_script(
             crash_speed = speeds[i]
             break
         covered += seg[i]
+    crash_x, crash_y, _ = raceanim.point_at(spine, spec.at_distance_m)
 
     script = generate_sparks_script(
         flow_name, floor_nodes,
@@ -976,6 +982,7 @@ def write_sparks_script(
         car_speed_ms=crash_speed,
         site_z=site_z,
         end_frame=end_frame,
+        contact_position=(crash_x, crash_y),
     )
 
     out = Path(path)
@@ -987,7 +994,7 @@ def write_sparks_script(
         "path": str(out),
         "lines": len(script.splitlines()),
         "summary": (
-            f"Sparks: {'point emitter (no floor nodes)' if not floor_nodes else str(len(floor_nodes)) + ' floor node(s)'}, "
+            f"Sparks: contact-point source ({len(floor_nodes)} floor node(s) reserved for collision), "
             f"burst frames {cf}-{burst_end} ({(burst_end - cf) / fps:.2f}s), "
             f"car speed {crash_speed:.1f} m/s, site z {site_z}."
         ),
@@ -997,6 +1004,7 @@ def write_sparks_script(
             "contact_frame": cf,
             "burst_end_frame": burst_end,
             "car_speed_ms": round(crash_speed, 2),
+            "contact_position": [round(crash_x, 3), round(crash_y, 3)],
             "site_z": site_z,
             "end_frame": end_frame,
         },

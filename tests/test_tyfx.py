@@ -425,17 +425,35 @@ def test_run_debris_script_success(tmp_path):
 
 # ── generate_sparks_script ────────────────────────────────────────────────────
 
-def test_generate_sparks_script_contains_required_keywords():
+def test_generate_sparks_script_contains_verified_operators_and_contact_source():
     script = tyfx.generate_sparks_script(
         "Atlas_Sparks", ["car_03_body"],
         contact_frame=1680,
         car_speed_ms=55.0,
         site_z=5.27,
         end_frame=2400,
+        contact_position=(12.5, -4.0),
     )
-    for keyword in ("tyBirthFlow", "Gravity", "tyPhysicsDrag",
-                    "tyTestAge", "VRayLightMtl"):
+    for keyword in (
+        "Sphere radius:0.02",
+        "source.pos = [12.5, -4.0, 5.27]",
+        '.addOperator "Birth" -1',
+        '.addOperator "Position Object" -1',
+        '.addOperator "Speed" -1',
+        '.addOperator "Force" -1',
+        '.addOperator "Scale" -1',
+        '.addOperator "Time Test" -1',
+        '.addOperator "Delete" -1',
+        "birth.birthMode = 1",
+        "force.gravityStrength = -1",
+        "speed.magnitude = 5.5",
+        "age.value = 8",
+        "tf.reset_simulation()",
+        "VRayLightMtl",
+    ):
         assert keyword in script, f"expected '{keyword}' in sparks script"
+    for obsolete in ("tyBirthFlow", "tyPositionObject", "tySpeed", "tf.Update()"):
+        assert obsolete not in script
 
 
 def test_generate_sparks_script_empty_floor_nodes_still_works():
@@ -448,7 +466,7 @@ def test_generate_sparks_script_empty_floor_nodes_still_works():
         end_frame=2400,
     )
     assert len(script) > 100
-    assert "tyBirthFlow" in script
+    assert "Sphere radius:0.02" in script
 
 
 def test_generate_sparks_script_burst_window():
@@ -490,7 +508,8 @@ def test_write_sparks_script_empty_floor_nodes(tmp_path):
     )
     assert Path(result["path"]).is_file()
     assert result["lines"] > 0
-    assert "point emitter" in result["summary"]
+    assert "contact-point source" in result["summary"]
+    assert len(result["params"]["contact_position"]) == 2
 
 
 # ── run_sparks_script ─────────────────────────────────────────────────────────
