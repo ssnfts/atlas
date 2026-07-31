@@ -225,7 +225,30 @@ build_graph("ground", ["atlas_terrain"], "ground")
 if kerbs:
     build_graph("kerb", [m.name for m in kerbs], "kerb")
 assign_flat("line_paint", [m.name for m in lines + boxes], "line_paint")
-assign_flat("car_body", [m.name for m in grid_cars], "car_body")
+
+# Cars come back as three meshes each — body, tyres, rims — because rubber,
+# machined aluminium and painted carbon are three genuinely different surfaces
+# and one material for all three is what makes a proxy look like a toy.
+assign_flat("tyre", [m.name for m in grid_cars if m.name.endswith("_tyres")], "tyre")
+assign_flat("rim", [m.name for m in grid_cars if m.name.endswith("_rims")], "rim")
+
+# Bodywork: one material per colour, not per car. Colours only — no livery, no
+# marks, no team names anywhere in this scene.
+bodies: dict[str, list[str]] = {}
+for m in grid_cars:
+    if m.name.endswith("_tyres") or m.name.endswith("_rims"):
+        continue
+    label, rgb = m.metadata["colour"]
+    bodies.setdefault(label, []).append(m.name)
+
+base = PRESETS["car_body"]
+for label, nodes in sorted(bodies.items()):
+    rgb = next(c for lbl, c in cars.RACING_COLOURS if lbl == label)
+    params = base.to_params()
+    params["diffuse"] = {"__color__": list(rgb)}
+    res = b.assign_material(nodes, params=params, name=f"atlas_car_{label.replace(' ', '_')}")
+    print(f"  {'car ' + label:22} {len(nodes):5d} nodes  "
+          f"rejected={len(res.get('rejected') or {})}")
 
 pairs = [(bu, m.name) for bu, m in zip(buildings, b_meshes)]
 for key, nodes in group_by_material(pairs).items():

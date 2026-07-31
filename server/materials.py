@@ -108,6 +108,21 @@ PRESETS: dict[str, MaterialSpec] = {
             "read as a track at grazing light."
         ),
     ),
+    "tyre": MaterialSpec(
+        "atlas_tyre", (17, 17, 19), (34, 34, 36), 0.36, 1.52,
+        note=(
+            "racing slick. The mistake with rubber is making it matte black: "
+            "a real tyre is very dark but not flat, and carries a broad soft "
+            "sheen across the shoulder that is most of what says 'rubber' "
+            "rather than 'painted plastic'. Diffuse near 17/255 with a weak, "
+            "rough reflection gives that; a glossy black gives a bowling ball "
+            "and a matte black gives a hole in the image."
+        ),
+    ),
+    "rim": MaterialSpec(
+        "atlas_rim", (122, 124, 128), (188, 190, 194), 0.72, 3.0, 1.0,
+        note="machined aluminium wheel face; metalness 1.0 so diffuse is ignored",
+    ),
     "car_body": MaterialSpec(
         "atlas_car_body", (28, 30, 36), (128, 130, 136), 0.88, 1.6,
         note=(

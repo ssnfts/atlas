@@ -50,13 +50,52 @@ class CarSpec:
     wheelbase: float = 3.60
     track: float = 1.60
     tyre_diameter: float = 0.72
-    tyre_width: float = 0.38
+    # Front and rear are not the same tyre. The 2022 regulations put 305 mm on
+    # the front and 405 mm on the rear, and that 100 mm is one of the most
+    # recognisable things about an open-wheel car from behind — building both
+    # ends at one width is the sort of detail whose absence reads as "model"
+    # without anyone being able to say why.
+    tyre_width_front: float = 0.305
+    tyre_width_rear: float = 0.405
+    rim_diameter: float = 0.4572        # 18 inch
     nose_height: float = 0.28
     body_width: float = 0.90
 
 
 # The 2022-regulation single-seater. Named for the ruleset, not for any car.
 F1_2022 = CarSpec()
+
+# A grid's worth of racing colours, two cars to a colour the way a real field
+# pairs team-mates.
+#
+# **Colours only — no liveries, no marks, no team names.** A flat colour is not
+# anyone's intellectual property; a livery is a design and a badge is a
+# trademark, and neither appears here or should be added. These are named for
+# what they are rather than for who runs them, because a shade of red on a
+# generic car is a shade of red, and calling it by a team's name is the first
+# step toward implying something about that team.
+RACING_COLOURS = [
+    ("scarlet",      (168, 22, 24)),
+    ("scarlet",      (168, 22, 24)),
+    ("gunmetal",     (32, 36, 42)),
+    ("gunmetal",     (32, 36, 42)),
+    ("deep navy",    (18, 34, 84)),
+    ("deep navy",    (18, 34, 84)),
+    ("papaya",       (214, 96, 18)),
+    ("papaya",       (214, 96, 18)),
+    ("racing green", (14, 78, 58)),
+    ("racing green", (14, 78, 58)),
+    ("french blue",  (24, 92, 168)),
+    ("french blue",  (24, 92, 168)),
+    ("white",        (208, 208, 212)),
+    ("white",        (208, 208, 212)),
+    ("sky blue",     (86, 150, 198)),
+    ("sky blue",     (86, 150, 198)),
+    ("maroon",       (96, 24, 40)),
+    ("maroon",       (96, 24, 40)),
+    ("slate",        (74, 82, 92)),
+    ("slate",        (74, 82, 92)),
+]
 
 
 def _box(cx, cy, cz, sx, sy, sz):
@@ -79,29 +118,96 @@ def _box(cx, cy, cz, sx, sy, sz):
     return v, f
 
 
-def _cylinder(cx, cy, cz, radius, width, *, axis="x", segments=24):
-    """A wheel: a cylinder whose axis lies along ``axis``."""
-    verts, faces = [], []
-    half = width / 2.0
-    for end, sign in ((0, -1.0), (1, 1.0)):
+def _revolve(cx, cy, cz, profile, *, segments=48):
+    """
+    Revolve a ``(radius, offset)`` profile about the wheel's axle (the X axis).
+
+    A tyre is not a cylinder. A cylinder has square corners where the tread
+    meets the sidewall, and square corners are exactly where a low sun puts a
+    hard specular line — which is what made the first proxies read as blocks
+    with rounded ends rather than as tyres. Revolving a profile gives the real
+    shape: a crowned tread, a rounded shoulder, a sidewall that tucks back in
+    to the rim, and a bead. The shoulder highlight then travels around the
+    curve the way it does on a photograph of a car.
+
+    ``profile`` runs from one bead across the tyre to the other, as
+    ``(radius_m, x_offset_m)`` pairs. Open at both ends; the caller closes it
+    with a rim disc.
+    """
+    verts: list[tuple[float, float, float]] = []
+    for radius, offset in profile:
         for s in range(segments):
             a = 2.0 * math.pi * s / segments
-            dy, dz = math.cos(a) * radius, math.sin(a) * radius
-            if axis == "x":
-                verts.append((cx + sign * half, cy + dy, cz + dz))
-            else:
-                verts.append((cx + dy, cy + sign * half, cz + dz))
-        verts.append((cx + sign * half, cy, cz) if axis == "x"
-                     else (cx, cy + sign * half, cz))
+            verts.append((cx + offset,
+                          cy + math.cos(a) * radius,
+                          cz + math.sin(a) * radius))
 
-    ring = segments + 1
+    faces: list[tuple[int, int, int]] = []
+    for ring in range(len(profile) - 1):
+        base_a, base_b = ring * segments, (ring + 1) * segments
+        for s in range(segments):
+            s2 = (s + 1) % segments
+            a0, a1 = base_a + s, base_a + s2
+            b0, b1 = base_b + s, base_b + s2
+            # Wound so the normal points away from the axle. The first version
+            # had these reversed, which was invisible in every dimension check
+            # -- widths, diameter and profile were all exact -- and showed up
+            # only as a negative signed volume once the wheel was closed with
+            # its rim discs. An inside-out tyre renders as a dark hole under a
+            # low sun rather than as an error.
+            faces += [(a0, b1, b0), (a0, a1, b1)]
+    return verts, faces
+
+
+def _tyre_profile(spec: CarSpec, width: float):
+    """
+    Half-section of a modern slick, mirrored about the wheel centre.
+
+    The numbers are the shape of an 18-inch F1 tyre: a bead at the rim, a
+    sidewall that stands nearly straight, a shoulder that rolls over across
+    about 45 mm, and a tread that crowns very slightly toward the middle. The
+    crown matters more than it sounds — it is why a tyre catches a band of
+    light along its centre rather than a flat sheet across the whole tread.
+    """
+    rim = spec.rim_diameter / 2.0
+    outer = spec.tyre_diameter / 2.0
+    shoulder = outer - 0.018          # where the roll-over starts
+    half = width / 2.0
+    lip = half - 0.045                # tread width before the shoulder
+
+    # The bead is the outermost point at each end, so a rim disc placed at
+    # +/- half closes the wheel exactly. An earlier version put the sidewall
+    # root 10 mm outboard of the bead, which left a ring where the surface was
+    # open — invisible in a render and enough to make the signed-volume check
+    # meaningless, since the mesh it was measuring was not closed.
+    return [
+        (rim,          -half),           # bead, seals against the rim disc
+        (rim + 0.030,  -half + 0.006),   # sidewall root
+        (shoulder,     -half + 0.020),   # sidewall out to the shoulder
+        (outer,        -lip),            # shoulder roll-over
+        (outer + 0.004, 0.0),            # crowned tread centre
+        (outer,         lip),
+        (shoulder,      half - 0.020),
+        (rim + 0.030,   half - 0.006),
+        (rim,           half),           # bead, outboard
+    ]
+
+
+def _disc(cx, cy, cz, radius, offset, *, segments=48, facing=1.0):
+    """A flat disc closing the wheel — the rim face."""
+    verts = [(cx + offset, cy, cz)]
+    for s in range(segments):
+        a = 2.0 * math.pi * s / segments
+        verts.append((cx + offset,
+                      cy + math.cos(a) * radius,
+                      cz + math.sin(a) * radius))
+    faces = []
     for s in range(segments):
         s2 = (s + 1) % segments
-        a0, a1 = s, s2
-        b0, b1 = ring + s, ring + s2
-        faces += [(a0, b0, b1), (a0, b1, a1)]        # barrel
-        faces.append((a0, a1, segments))              # -end cap
-        faces.append((b1, b0, ring + segments))       # +end cap
+        if facing >= 0:
+            faces.append((0, 1 + s, 1 + s2))
+        else:
+            faces.append((0, 1 + s2, 1 + s))
     return verts, faces
 
 
@@ -146,11 +252,6 @@ def car_mesh(name: str, spec: CarSpec = F1_2022, *, z: float = 0.0) -> Mesh:
     add(*_box(0.0, -0.62, z + spec.height - 0.14, 0.36, 0.95, 0.34))
     add(*_box(0.0, 0.18, z + spec.height - 0.06, 0.60, 0.06, 0.16))
 
-    # Wheels, at the corners of the wheelbase and track.
-    for fy in (spec.wheelbase / 2.0, -spec.wheelbase / 2.0):
-        for sx in (-spec.track / 2.0, spec.track / 2.0):
-            add(*_cylinder(sx, fy, axle_z, tyre_r, spec.tyre_width, axis="x"))
-
     mesh = Mesh(verts=verts, faces=faces, name=name)
     mesh.metadata.update({
         "kind": "car_proxy",
@@ -160,6 +261,51 @@ def car_mesh(name: str, spec: CarSpec = F1_2022, *, z: float = 0.0) -> Mesh:
         "width_m": spec.width,
     })
     return mesh
+
+
+def wheel_meshes(name: str, spec: CarSpec = F1_2022, *, z: float = 0.0,
+                 segments: int = 48) -> tuple[Mesh, Mesh]:
+    """
+    All four tyres as one mesh, and all four rims as another.
+
+    Split by material, not by wheel: rubber and machined aluminium are as far
+    apart as two surfaces in this scene get — one is near-black and almost
+    matte, the other is a bright metal — and keeping them in one object would
+    force a single compromise material onto both. Four wheels per mesh rather
+    than sixteen objects keeps the scene node count down.
+    """
+    tyre_v: list = []
+    tyre_f: list = []
+    rim_v: list = []
+    rim_f: list = []
+
+    def add(target_v, target_f, v, f):
+        base = len(target_v)
+        target_v.extend(v)
+        target_f.extend((a + base, b + base, c + base) for a, b, c in f)
+
+    axle_z = z + spec.tyre_diameter / 2.0
+    rim_r = spec.rim_diameter / 2.0
+
+    for fy, width in ((spec.wheelbase / 2.0, spec.tyre_width_front),
+                      (-spec.wheelbase / 2.0, spec.tyre_width_rear)):
+        for sx in (-spec.track / 2.0, spec.track / 2.0):
+            profile = _tyre_profile(spec, width)
+            add(tyre_v, tyre_f, *_revolve(sx, fy, axle_z, profile, segments=segments))
+            # Rim faces, one per side, facing outward.
+            for offset, facing in ((-width / 2.0, -1.0),
+                                   (width / 2.0, 1.0)):
+                add(rim_v, rim_f,
+                    *_disc(sx, fy, axle_z, rim_r, offset,
+                           segments=segments, facing=facing))
+
+    tyres = Mesh(verts=tyre_v, faces=tyre_f, name=f"{name}_tyres")
+    tyres.metadata.update({"kind": "tyres", "segments": segments,
+                           "width_front_m": spec.tyre_width_front,
+                           "width_rear_m": spec.tyre_width_rear})
+    rims = Mesh(verts=rim_v, faces=rim_f, name=f"{name}_rims")
+    rims.metadata.update({"kind": "rims", "rim_diameter_m": spec.rim_diameter})
+    return tyres, rims
 
 
 def cars_on_grid(placements, spec: CarSpec = F1_2022, *, z: float = 0.0,
@@ -175,18 +321,23 @@ def cars_on_grid(placements, spec: CarSpec = F1_2022, *, z: float = 0.0,
     """
     out: list[Mesh] = []
     for index, (x, y, heading) in enumerate(placements):
-        car = car_mesh(f"{name}_{index + 1:02d}", spec, z=0.0)
+        slot = f"{name}_{index + 1:02d}"
+        parts = [car_mesh(slot, spec, z=0.0)]
+        parts.extend(wheel_meshes(slot, spec, z=0.0))
+
         a = math.radians(heading)
         sin_a, cos_a = math.sin(a), math.cos(a)
-        car.verts = [
-            (x + vx * cos_a + vy * sin_a,
-             y - vx * sin_a + vy * cos_a,
-             z + vz)
-            for vx, vy, vz in car.verts
-        ]
-        car.metadata["grid_slot"] = index + 1
-        car.metadata["heading_deg"] = round(heading, 2)
-        out.append(car)
+        for part in parts:
+            part.verts = [
+                (x + vx * cos_a + vy * sin_a,
+                 y - vx * sin_a + vy * cos_a,
+                 z + vz)
+                for vx, vy, vz in part.verts
+            ]
+            part.metadata["grid_slot"] = index + 1
+            part.metadata["heading_deg"] = round(heading, 2)
+            part.metadata["colour"] = RACING_COLOURS[index % len(RACING_COLOURS)]
+        out.extend(parts)
     return out
 
 
