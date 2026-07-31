@@ -34,10 +34,20 @@ LAT, LON = 24.46944, 54.60306
 SITE_Z = 5.27
 SUN_ALT = 7.5557
 FPS = 24
-LAP_SECONDS = 100.0                 # screen time for one lap, not a lap time
 FIELD = 20
 
-END_FRAME = int(FPS * LAP_SECONDS)
+# The timeline is the *edit*, not the lap. Shots each declare their screen time
+# and are laid end to end; the cars are driven from whatever lap moment the cut
+# under the playhead is watching. Deriving the timeline from the lap instead was
+# what gave every locked-off shot a single frame.
+CUTS = raceanim.build_edit(fps=FPS, lap_seconds=raceanim.lap_time(
+    roadway.stitch_paths(
+        roadway.parse_ways(
+            json.loads((ROOT / 'out' / 'yas_raceway.json').read_text()),
+            keep=lambda t: t.get('name', '').lower() == 'yas marina circuit'
+            and t.get('sport') == 'motor'),
+        SceneFrame(LAT, LON))[0].xy))
+END_FRAME = raceanim.edit_length_frames(CUTS)
 OUT = ROOT / "out"
 
 b = MaxBridge()
@@ -51,10 +61,12 @@ main = roadway.parse_ways(
 spine = roadway.stitch_paths(main, frame)[0].xy
 lap_m = raceanim.lap_length(spine)
 
-print(f"lap {lap_m:.1f} m over {LAP_SECONDS:.0f} s at {FPS} fps "
-      f"= {END_FRAME} frames")
-print(f"mean speed {lap_m / LAP_SECONDS * 3.6:.0f} km/h "
-      f"(constant along the arc — blocking, not a simulation)")
+lap_s = raceanim.lap_time(spine)
+speeds = raceanim.speed_profile(spine)
+print(f"lap {lap_m:.1f} m, modelled {lap_s:.1f} s "
+      f"({min(speeds) * 3.6:.0f}-{max(speeds) * 3.6:.0f} km/h)")
+print(f"edit: {len(CUTS)} cuts, {END_FRAME} frames = {END_FRAME / FPS:.1f} s "
+      f"at {FPS} fps")
 print("range:", b.animation_range(0, END_FRAME, fps=FPS))
 
 # ── cars, rebuilt at the origin so they can be transformed ───────────────────
@@ -88,22 +100,37 @@ for label, nodes in bodies.items():
 # follows the circuit rather than cutting its corners, sparse enough that the
 # track view stays readable: at 24 fps a key every 8 frames is a third of a
 # second, and no corner here is taken in less than two.
-KEY_EVERY = 8
+KEY_EVERY = 4
 sample_frames = list(range(0, END_FRAME + 1, KEY_EVERY))
 if sample_frames[-1] != END_FRAME:
     sample_frames.append(END_FRAME)
 
-for slot in range(FIELD):
-    keys = []
-    for f in sample_frames:
-        lap_fraction = f / END_FRAME
-        places = raceanim.field_positions(spine, lap_fraction, count=FIELD)
-        x, y, heading = places[slot]
-        keys.append({"frame": f, "pos": [x, y, SITE_Z], "heading_deg": heading})
 
+def lap_seconds_at(frame: int) -> float:
+    """
+    The lap moment at a timeline frame.
+
+    A straight proportion, because the timeline *is* the lap: the field runs
+    once round without interruption and the cameras cut around it. An earlier
+    version looked this up per cut, which let consecutive shots watch
+    non-adjacent parts of the circuit — and the cars then teleported between
+    them, sliding 500 m across a single key interval.
+    """
+    return (frame / END_FRAME) * lap_s
+
+
+car_keys: dict[int, list[dict]] = {slot: [] for slot in range(FIELD)}
+for f in sample_frames:
+    places = raceanim.field_at_time(spine, lap_seconds_at(f), count=FIELD)
+    for slot, (x, y, heading, roll, pitch) in enumerate(places):
+        quat = raceanim.orientation_quat(heading, pitch, roll)
+        car_keys[slot].append({"frame": f, "pos": [x, y, SITE_Z],
+                               "quat": list(quat)})
+
+for slot in range(FIELD):
     for suffix in ("", "_tyres", "_rims"):
         node = f"car_{slot + 1:02d}{suffix}"
-        result = b.set_keys(node, keys, timeout=300.0)
+        result = b.set_keys(node, car_keys[slot], timeout=600.0)
         if not result["moved"]:
             raise SystemExit(
                 f"{node} accepted {result['keys']} keys but did not move — its "
@@ -118,10 +145,10 @@ print(f"keyed {FIELD} cars x 3 parts, {len(sample_frames)} keys each")
 # still gets two identical keys, which is what makes it obvious in the track
 # view that it is locked off by intent rather than by omission.
 shot_log = []
-for index, shot in enumerate(raceanim.SHOTS, start=1):
+for index, cut in enumerate(CUTS, start=1):
+    shot = cut.shot
     name = f"Cam_{index:02d}_{shot.name}"
-    start_f = int(shot.lap_from * END_FRAME)
-    end_f = max(int(shot.lap_to * END_FRAME), start_f + 1)
+    start_f, end_f = cut.start_frame, cut.end_frame
 
     first_pos, first_tgt, fov = raceanim.camera_for(
         shot, spine, shot.lap_from, SITE_Z)

@@ -615,6 +615,24 @@ def cmd_set_keys(params: dict) -> dict:
                 # right, and only a non-zero heading moved it. Setting the
                 # rotation first and the position after leaves the translation
                 # as the last word.
+                # A quaternion, composed by the caller, is the preferred form.
+                # Max's Euler convention produced a *mirrored* yaw here — a car
+                # keyed at heading 90 pointed west — and applied pitch and roll
+                # about the world axes rather than the body's, so a 3 degree
+                # roll at heading 90 came out as pitch. Both were invisible near
+                # heading 0 and wrong everywhere else. Sending an explicit
+                # quaternion moves that convention into Python, where it is
+                # arithmetic and can be tested without a running 3ds Max.
+                quat = key.get("quat")
+                if quat is not None:
+                    w, qx, qy, qz = quat
+                    node.rotation = rt.quat(float(qx), float(qy), float(qz), float(w))
+                    position = key.get("pos")
+                    if position is not None:
+                        x, y, z = position
+                        node.pos = rt.Point3(float(x), float(y), float(z))
+                    continue
+
                 heading = key.get("heading_deg")
                 pitch = key.get("pitch_deg")
                 roll = key.get("roll_deg")

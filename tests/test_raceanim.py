@@ -184,3 +184,110 @@ def test_the_cut_list_covers_the_crash_from_two_angles():
     assert len(crash) == 2
     for shot in crash:
         assert shot.lap_from < shot.lap_to or shot.kind == "static"
+
+
+# ── orientation: the convention, pinned ──────────────────────────────────────
+
+def test_nose_points_where_the_heading_says():
+    """
+    The bug this locks: Max's Euler path produced the *mirrored* yaw. A car
+    keyed at heading 90 pointed west. Headings are clockwise from +Y, so the
+    nose must land on (sin h, cos h).
+    """
+    for h in (0.0, 45.0, 90.0, 137.0, 180.0, 198.0, 270.0, 355.0):
+        nose = ra.nose_direction(ra.orientation_quat(h))
+        assert nose[0] == pytest.approx(math.sin(math.radians(h)), abs=1e-9)
+        assert nose[1] == pytest.approx(math.cos(math.radians(h)), abs=1e-9)
+        assert nose[2] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_roll_is_about_the_nose_not_the_world():
+    """
+    The second bug: pitch and roll were applied about world axes, so a roll at
+    heading 90 came out as pitch. Rolling about the nose cannot move the nose,
+    at any heading.
+    """
+    for h in (0.0, 90.0, 198.0, 270.0):
+        clean = ra.nose_direction(ra.orientation_quat(h))
+        rolled = ra.nose_direction(ra.orientation_quat(h, 0.0, 4.0))
+        assert math.dist(clean, rolled) < 1e-9
+
+
+def test_pitch_lifts_or_drops_the_nose_at_any_heading():
+    for h in (0.0, 90.0, 198.0, 270.0):
+        up = ra.nose_direction(ra.orientation_quat(h, 5.0, 0.0))
+        assert up[2] > 0.05, f"pitch did nothing vertical at heading {h}"
+
+
+def test_quaternions_stay_unit_length():
+    for h in (0.0, 123.0, 359.0):
+        q = ra.orientation_quat(h, 2.0, -3.0)
+        assert math.sqrt(sum(c * c for c in q)) == pytest.approx(1.0, abs=1e-12)
+
+
+# ── the edit ─────────────────────────────────────────────────────────────────
+
+def test_every_cut_gets_real_screen_time():
+    """
+    The sequencer bug: screen time was derived from the lap window, so a
+    locked-off shot (lap_from == lap_to) came out one frame long — 0.04 s.
+    """
+    for cut in ra.build_edit(fps=24):
+        assert cut.frames >= 12, f"{cut.shot.name} is only {cut.frames} frames"
+
+
+def test_cuts_tile_the_timeline_without_gaps_or_overlap():
+    cuts = ra.build_edit(fps=24)
+    assert cuts[0].start_frame == 0
+    for earlier, later in zip(cuts, cuts[1:]):
+        assert later.start_frame == earlier.end_frame
+
+
+def test_the_crash_is_covered_by_two_consecutive_cuts():
+    """
+    Two angles, adjacent rather than overlapping. An earlier design let the two
+    crash cameras share a lap window, which meant consecutive cuts watched the
+    same moment — and since the cars run one continuous lap, that made them jump
+    backwards at the cut. The wide takes the approach and the contact, the tight
+    takes the slide.
+    """
+    crash = [s for s in ra.SHOTS if "crash" in s.name]
+    assert len(crash) == 2
+    wide, tight = crash
+    assert wide.lap_to == pytest.approx(tight.lap_from)
+    crash_lap = ra.CRASH.at_distance_m / 5289.5
+    assert wide.lap_from < crash_lap < tight.lap_to, "the incident must be inside the coverage"
+
+
+def test_the_lap_is_tiled_with_no_gap_or_overlap():
+    shots = ra.SHOTS
+    assert shots[0].lap_from == pytest.approx(0.0)
+    assert shots[-1].lap_to == pytest.approx(1.0)
+    for earlier, later in zip(shots, shots[1:]):
+        assert later.lap_from == pytest.approx(earlier.lap_to)
+
+
+def test_a_gap_between_shots_is_refused():
+    """A gap means the cars jump; better to fail here than in a render."""
+    a = ra.Shot("a", "static", 0.0, 0.3, lambda s, t, z: None)
+    b_ = ra.Shot("b", "static", 0.5, 1.0, lambda s, t, z: None)   # gap at 0.3-0.5
+    with pytest.raises(ValueError, match="tile the lap"):
+        ra.build_edit([a, b_], fps=24)
+
+
+def test_a_zero_width_lap_window_is_refused():
+    """
+    A locked-off camera is fixed in space, not in time. Giving it a zero-width
+    window is what produced 1-frame cuts.
+    """
+    bad = ra.Shot("bad", "static", 0.5, 0.5, lambda s, t, z: None)
+    with pytest.raises(ValueError, match="no width"):
+        ra.build_edit([bad], fps=24)
+
+
+def test_cut_reports_the_lap_moment_it_is_watching():
+    cuts = ra.build_edit(fps=24)
+    moving = next(c for c in cuts if c.shot.lap_to > c.shot.lap_from)
+    assert moving.lap_at(moving.start_frame) == pytest.approx(moving.shot.lap_from)
+    mid = moving.lap_at((moving.start_frame + moving.end_frame) // 2)
+    assert moving.shot.lap_from < mid < moving.shot.lap_to

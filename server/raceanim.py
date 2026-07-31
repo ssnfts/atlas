@@ -61,7 +61,82 @@ __all__ = [
     "CrashSpec",
     "CRASH",
     "crash_state",
+    "Cut",
+    "build_edit",
+    "edit_length_frames",
+    "orientation_quat",
+    "nose_direction",
 ]
+
+
+def orientation_quat(heading_deg: float, pitch_deg: float = 0.0,
+                     roll_deg: float = 0.0) -> tuple[float, float, float, float]:
+    """
+    Body orientation as a quaternion ``(w, x, y, z)``.
+
+    Composed here rather than handed to 3ds Max as Euler angles, because Max's
+    Euler convention cost this project two real bugs that a render showed only
+    as "the cars look wrong":
+
+    * ``EulerAngles(0, 0, -heading)`` produced the **mirrored** rotation. A car
+      keyed at heading 90 pointed west. Measured off the node's transform, not
+      guessed: its local Y axis came back as ``[-1, 0, 0]``.
+    * Pitch and roll were applied about the **world** axes rather than the car's
+      own. At heading 90 a 3 degree roll tilted the body about world Y, which is
+      pitch as far as the car is concerned. This is invisible while yaw is small
+      and wrong everywhere else — an earlier comment here claimed the difference
+      was below what a frame shows, and that was only true near heading 0.
+
+    Composing the quaternion in Python makes the convention explicit and, more
+    usefully, testable without a running 3ds Max: the nose direction for any
+    heading is arithmetic, checkable against ``(sin h, cos h)``.
+
+    Intrinsic Z-X-Y: yaw about the world up axis first, then pitch about the
+    car's own lateral axis, then roll about its own nose axis. That order is
+    what makes pitch and roll mean "nose down" and "lean" regardless of which
+    way the car is facing.
+    """
+    # Scene headings run clockwise from +Y (north). A right-handed rotation
+    # about +Z runs anticlockwise, so the yaw angle is the negative.
+    z = math.radians(-heading_deg)
+    x = math.radians(pitch_deg)
+    y = math.radians(roll_deg)
+
+    def q_axis(angle, axis):
+        half = angle / 2.0
+        s = math.sin(half)
+        return (math.cos(half), axis[0] * s, axis[1] * s, axis[2] * s)
+
+    def q_mul(a, b):
+        aw, ax, ay, az = a
+        bw, bx, by, bz = b
+        return (
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        )
+
+    q = q_mul(q_axis(z, (0.0, 0.0, 1.0)), q_axis(x, (1.0, 0.0, 0.0)))
+    q = q_mul(q, q_axis(y, (0.0, 1.0, 0.0)))
+    return q
+
+
+def nose_direction(quat) -> tuple[float, float, float]:
+    """
+    Where a car with this orientation is pointing, in world axes.
+
+    The car is modelled nose along local +Y, so this rotates ``(0, 1, 0)``. It
+    exists to make the convention checkable: for a heading of ``h`` and no
+    attitude, the answer must be ``(sin h, cos h, 0)``, which is a property a
+    test can assert without a host.
+    """
+    w, x, y, z = quat
+    return (
+        2.0 * (x * y - w * z),
+        1.0 - 2.0 * (x * x + z * z),
+        2.0 * (y * z + w * x),
+    )
 
 
 # ── speed, from the shape of the circuit ─────────────────────────────────────
@@ -340,19 +415,43 @@ def field_at_time(spine, seconds: float, count: int = 20, *,
 
     Returns ``(x, y, heading, roll, pitch)`` per car, leader first.
     """
+    lap_s = max(lap_time(spine, closed), 1e-3)
+
+    def placed(car_index: int, at_seconds: float):
+        """Where car ``car_index`` is, including its lateral offset."""
+        distance = distance_at(spine, at_seconds % lap_s, closed)
+        x, y, heading = point_at(spine, distance, closed=closed)
+        side = 1.0 if car_index % 2 == 0 else -1.0
+        a = math.radians(heading)
+        nx, ny = math.cos(a), -math.sin(a)
+        return x + nx * side * stagger_m, y + ny * side * stagger_m, distance
+
     out = []
     for i in range(count):
         t = seconds - i * gap_s
-        distance = distance_at(spine, t % max(lap_time(spine, closed), 1e-3),
-                               closed)
-        x, y, heading = point_at(spine, distance, closed=closed)
-        roll, pitch = attitude_at(spine, distance, closed)
+        x, y, distance = placed(i, t)
 
-        side = 1.0 if i % 2 == 0 else -1.0
-        a = math.radians(heading)
-        nx, ny = math.cos(a), -math.sin(a)
-        out.append((x + nx * side * stagger_m, y + ny * side * stagger_m,
-                    heading, roll, pitch))
+        # Heading from the car's **own** path, not the centre-line's.
+        #
+        # A car running 3 m off the centre-line through a 22 m corner is on a
+        # different arc, and pointing it along the centre-line tangent leaves it
+        # visibly crabbed — measured at up to 30 degrees off its direction of
+        # travel at the apex, against 0.8 degrees on a straight. Differencing
+        # its own position over a short interval gives the direction it is
+        # actually going, which is what a heading is.
+        # A **centred** difference, not a forward one. A forward chord points
+        # where the car will be, which through a 22 m corner is several degrees
+        # off where it is pointing now; centring the interval cancels that to
+        # second order and costs one extra sample.
+        back_x, back_y, _ = placed(i, t - 0.06)
+        fwd_x, fwd_y, _ = placed(i, t + 0.06)
+        dx, dy = fwd_x - back_x, fwd_y - back_y
+        heading = (math.degrees(math.atan2(dx, dy)) % 360.0
+                   if math.hypot(dx, dy) > 1e-6
+                   else point_at(spine, distance, closed=closed)[2])
+
+        roll, pitch = attitude_at(spine, distance, closed)
+        out.append((x, y, heading, roll, pitch))
     return out
 
 
@@ -417,7 +516,8 @@ class CrashSpec:
     launch_height_m: float = 0.9     # how far the victim gets pitched up
 
 
-CRASH = CrashSpec(at_distance_m=1980.0)
+# Lap 0.69, which is inside the 11_crash_wide window (0.646-0.742).
+CRASH = CrashSpec(at_distance_m=3650.0)
 
 
 def crash_state(spec: CrashSpec, t_since_contact: float, base_heading: float):
@@ -465,15 +565,22 @@ def crash_state(spec: CrashSpec, t_since_contact: float, base_heading: float):
 @dataclass(frozen=True)
 class Shot:
     """
-    One camera setup.
+    One camera setup, and how long it is on screen.
 
-    ``kind`` is documentation rather than behaviour — a drone shot and a locked
-    -off shot are both "a camera position per frame" — but it is worth carrying,
-    because a cut list that cannot say which shots move is not a cut list.
+    **Lap time and screen time are different axes, and conflating them was a
+    bug.** The lap window says what part of the circuit the camera watches;
+    ``duration_s`` says how long the cut runs. Deriving the second from the
+    first meant every locked-off shot — where ``lap_from == lap_to`` — came out
+    one frame long, which is 0.04 s and unusable, and it made two cameras
+    covering one incident look like an overlap error when it is in fact how a
+    broadcast plays a crash.
+
+    So lap windows **may** overlap. Screen slots may not, and
+    :func:`build_edit` enforces that.
 
     ``at`` is called with ``(spine, lap_fraction, site_z)`` and returns
-    ``(position, target, fov)``. It is a function rather than a start/end pair
-    so a move can be an arc or a rise rather than only a straight line.
+    ``(position, target, fov)`` — a function rather than a start/end pair so a
+    move can be an arc or a rise rather than only a straight line.
     """
 
     name: str
@@ -482,6 +589,83 @@ class Shot:
     lap_to: float
     at: object = field(repr=False)
     note: str = ""
+
+
+@dataclass(frozen=True)
+class Cut:
+    """One shot's slot on the finished timeline."""
+
+    shot: Shot
+    start_frame: int
+    end_frame: int
+
+    @property
+    def frames(self) -> int:
+        return self.end_frame - self.start_frame
+
+    def lap_at(self, frame: int) -> float:
+        """The lap fraction this shot is watching at a given timeline frame."""
+        if self.frames <= 0:
+            return self.shot.lap_from
+        f = (frame - self.start_frame) / self.frames
+        return self.shot.lap_from + (self.shot.lap_to - self.shot.lap_from) * f
+
+
+def build_edit(shots=None, *, fps: int = 24, lap_seconds: float = 80.7,
+               min_frames: int = 12) -> list[Cut]:
+    """
+    Map each shot's lap window onto the timeline and return the cut list.
+
+    **The timeline is the lap.** Screen time is not a free parameter: the cars
+    are running one continuous lap, so a shot covering lap 0.24 to 0.33 occupies
+    exactly the frames during which the field is between those points, and the
+    shots must tile 0 to 1 without gap or overlap.
+
+    Two earlier versions of this got it wrong in opposite directions. The first
+    derived screen time from the lap window and gave every locked-off shot one
+    frame, because a static shot had a zero-width window. The second gave each
+    shot its own independent duration — which fixed the one-frame cuts and broke
+    something worse: consecutive cuts watched non-adjacent parts of the circuit,
+    so the cars *teleported* at every boundary, sliding 300-500 m between two
+    keys. Measured in the scene, not guessed: a car moved 540 m between samples
+    60 frames apart.
+
+    A static shot therefore needs a lap window with real width. It is locked off
+    in space, not in time; the world still moves through it.
+
+    Raises on a gap, an overlap, or a cut shorter than ``min_frames``, because
+    all three are silent in a render and obvious here.
+    """
+    shots = list(shots if shots is not None else SHOTS)
+    total = int(round(lap_seconds * fps))
+
+    cuts: list[Cut] = []
+    for index, shot in enumerate(shots):
+        if shot.lap_to <= shot.lap_from:
+            raise ValueError(
+                f"{shot.name}: lap window {shot.lap_from}->{shot.lap_to} has no "
+                "width. A locked-off camera still needs time to pass through it."
+            )
+        if index and abs(shot.lap_from - shots[index - 1].lap_to) > 1e-9:
+            raise ValueError(
+                f"{shot.name} starts at {shot.lap_from} but "
+                f"{shots[index - 1].name} ended at {shots[index - 1].lap_to}; "
+                "cuts must tile the lap, or the cars jump between them"
+            )
+        start = int(round(shot.lap_from * total))
+        end = int(round(shot.lap_to * total))
+        if end - start < min_frames:
+            raise ValueError(
+                f"{shot.name}: {end - start} frames at {fps} fps, under the "
+                f"{min_frames}-frame floor"
+            )
+        cuts.append(Cut(shot=shot, start_frame=start, end_frame=end))
+    return cuts
+
+
+def edit_length_frames(cuts) -> int:
+    """Total timeline length of an assembled edit."""
+    return max((c.end_frame for c in cuts), default=0)
 
 
 # ── shot helpers ──────────────────────────────────────────────────────────────
@@ -529,25 +713,25 @@ def _orbit(spine, lap_fraction, radius, up, turns, site_z, fov=40.0):
 # exactly the mistake that produced a frame of black on the first hero attempt.
 
 SHOTS: list[Shot] = [
-    Shot("01_grid_low", "static", 0.0, 0.0,
-         lambda s, t, z: _trackside(s, 0.0, -1.0, 11.0, 1.1, z, fov=40.0),
+    Shot("01_grid_low", "static", 0.0, 0.022,
+         lambda s, t, z, u: _trackside(s, 0.0, -1.0, 11.0, 1.1, z, fov=40.0),
          "grid, low and wide from the sunlit side"),
-    Shot("02_grid_rise", "drone", 0.0, 0.02,
-         lambda s, t, z: ((_lead(s, t)[0], _lead(s, t)[1] - 40.0,
-                           z + 6.0 + 60.0 * (t / 0.02 if t else 0.0)),
-                          (_lead(s, t)[0], _lead(s, t)[1], z), 46.0),
+    Shot("02_grid_rise", "drone", 0.022, 0.058,
+         lambda s, t, z, u: ((_lead(s, t)[0], _lead(s, t)[1] - 40.0,
+                             z + 6.0 + 58.0 * u),
+                            (_lead(s, t)[0], _lead(s, t)[1], z), 46.0),
          "rise off the grid as the field launches"),
-    Shot("03_t1_static", "static", 0.06, 0.06,
-         lambda s, t, z: _trackside(s, t, 1.0, 26.0, 3.2, z, fov=34.0),
+    Shot("03_t1_static", "static", 0.058, 0.092,
+         lambda s, t, z, u: _trackside(s, t, 1.0, 26.0, 3.2, z, fov=34.0),
          "locked off at the first corner"),
-    Shot("04_chase_back", "drone", 0.16, 0.20,
-         lambda s, t, z: _behind(s, t, 15.0, 2.5, 2.2, z, 22.0, 40.0),
+    Shot("04_chase_back", "drone", 0.092, 0.17,
+         lambda s, t, z, u: _behind(s, t, 15.0, 2.5, 2.2, z, 22.0, 40.0),
          "low chase, close behind the leader"),
-    Shot("05_skim", "drone", 0.26, 0.29,
-         lambda s, t, z: _behind(s, t, 9.0, -6.0, 0.9, z, 26.0, 34.0),
+    Shot("05_skim", "drone", 0.17, 0.24,
+         lambda s, t, z, u: _behind(s, t, 9.0, -6.0, 0.9, z, 26.0, 34.0),
          "skimming the surface alongside"),
-    Shot("06_hairpin_orbit", "drone", 0.36, 0.40,
-         lambda s, t, z: _orbit(s, t, 48.0, 22.0, 6.0, z, fov=38.0),
+    Shot("06_hairpin_orbit", "drone", 0.24, 0.33,
+         lambda s, t, z, u: _orbit(s, t, 48.0, 22.0, 6.0, z, fov=38.0),
          "orbiting the hairpin"),
     # On the circuit's own axis, not off to the side. The first version stood
     # 95 m out to one side with a 17 degree lens and rendered pure black -- at
@@ -555,18 +739,18 @@ SHOTS: list[Shot] = [
     # the unlit backs of its faces. A compressed telephoto down a straight is an
     # on-axis shot anyway: the long lens is what stacks the field up, and it
     # only stacks if you are looking along the line they are running.
-    Shot("07_long_lens", "static", 0.47, 0.47,
-         lambda s, t, z: _behind(s, t, 240.0, 1.5, 2.4, z, 30.0, 13.0),
+    Shot("07_long_lens", "static", 0.33, 0.4,
+         lambda s, t, z, u: _behind(s, t, 240.0, 1.5, 2.4, z, 30.0, 13.0),
          "long lens down the straight, field compressed"),
-    Shot("08_high_wide", "drone", 0.55, 0.58,
-         lambda s, t, z: ((_lead(s, t)[0] - 150.0, _lead(s, t)[1] - 190.0, z + 130.0),
+    Shot("08_high_wide", "drone", 0.4, 0.5,
+         lambda s, t, z, u: ((_lead(s, t)[0] - 150.0, _lead(s, t)[1] - 190.0, z + 130.0),
                           (_lead(s, t)[0], _lead(s, t)[1], z), 50.0),
          "high and wide, circuit in context"),
-    Shot("09_marina", "static", 0.66, 0.66,
-         lambda s, t, z: _trackside(s, t, 1.0, 34.0, 8.0, z, fov=40.0),
+    Shot("09_marina", "static", 0.5, 0.58,
+         lambda s, t, z, u: _trackside(s, t, 1.0, 34.0, 8.0, z, fov=40.0),
          "elevated static over the marina section"),
-    Shot("10_low_front", "static", 0.74, 0.74,
-         lambda s, t, z: (lambda p: ((p[0] + math.sin(math.radians(p[2])) * 30.0,
+    Shot("10_low_front", "static", 0.58, 0.646,
+         lambda s, t, z, u: (lambda p: ((p[0] + math.sin(math.radians(p[2])) * 30.0,
                                       p[1] + math.cos(math.radians(p[2])) * 30.0,
                                       z + 0.75),
                                      (p[0], p[1], z + 0.6), 30.0))(_lead(s, t)),
@@ -577,23 +761,36 @@ SHOTS: list[Shot] = [
     # contact so the anticipation is on screen -- cutting in *on* the impact
     # throws away the half second that makes it read as a mistake rather than a
     # glitch.
-    Shot("11_crash_wide", "drone", 0.735, 0.775,
-         lambda s, t, z: _behind(s, t, 62.0, 14.0, 11.0, z, 34.0, 40.0),
+    Shot("11_crash_wide", "drone", 0.646, 0.742,
+         lambda s, t, z, u: _behind(s, t, 62.0, 14.0, 11.0, z, 34.0, 40.0),
          "wide on the incident: the tell, the contact, the slide"),
-    Shot("12_crash_tight", "static", 0.745, 0.765,
-         lambda s, t, z: _trackside(s, t, 1.0, 21.0, 1.6, z, fov=26.0),
+    Shot("12_crash_tight", "static", 0.742, 0.82,
+         lambda s, t, z, u: _trackside(s, t, 1.0, 21.0, 1.6, z, fov=26.0),
          "trackside and tight, level with the impact"),
-    Shot("13_pullback", "drone", 0.84, 0.88,
-         lambda s, t, z: _behind(s, t, 30.0 + 340.0 * ((t - 0.84) / 0.04),
-                                 0.0, 12.0 + 150.0 * ((t - 0.84) / 0.04), z, 30.0, 46.0),
+    Shot("13_pullback", "drone", 0.82, 0.916,
+         lambda s, t, z, u: _behind(s, t, 30.0 + 340.0 * u,
+                                    0.0, 12.0 + 150.0 * u, z, 30.0, 46.0),
          "pull back and up, revealing the lap"),
-    Shot("14_finish", "drone", 0.98, 1.0,
-         lambda s, t, z: ((_lead(s, t)[0] + 26.0, _lead(s, t)[1] - 30.0, z + 16.0),
+    Shot("14_finish", "drone", 0.916, 1.0,
+         lambda s, t, z, u: ((_lead(s, t)[0] + 26.0, _lead(s, t)[1] - 30.0, z + 16.0),
                           (_lead(s, t)[0], _lead(s, t)[1], z + 0.5), 40.0),
          "over the line to finish the lap"),
 ]
 
 
 def camera_for(shot: Shot, spine, lap_fraction: float, site_z: float):
-    """Resolve a shot to ``(position, target, fov)`` at one moment."""
-    return shot.at(spine, lap_fraction, site_z)
+    """
+    Resolve a shot to ``(position, target, fov)`` at one moment.
+
+    The shot's callable receives ``(spine, lap_fraction, site_z, u)`` where
+    ``u`` is progress through its **own** window, 0 at the cut in and 1 at the
+    cut out. That fourth argument exists because two shots used to derive their
+    move from hardcoded lap numbers — ``(t - 0.84) / 0.04`` — and when the
+    windows were retiled those constants went stale silently. One of them
+    computed a negative height and put the camera underground, which the
+    below-site guard caught only at build time. A shot should not have to know
+    where it sits in the lap.
+    """
+    span = shot.lap_to - shot.lap_from
+    u = 0.0 if span <= 0 else max(0.0, min(1.0, (lap_fraction - shot.lap_from) / span))
+    return shot.at(spine, lap_fraction, site_z, u)
