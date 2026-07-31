@@ -120,20 +120,39 @@ PRESETS: dict[str, MaterialSpec] = {
         ),
     ),
     "rim": MaterialSpec(
-        "atlas_rim", (122, 124, 128), (188, 190, 194), 0.72, 3.0, 1.0,
-        note="machined aluminium wheel face; metalness 1.0 so diffuse is ignored",
+        "atlas_rim", (58, 60, 64), (96, 98, 102), 0.55, 3.0, 0.55,
+        note=(
+            "dark anodised wheel face. Metalness was 1.0 with a bright "
+            "reflection, and a full mirror at that angle did the only thing a "
+            "mirror can: it reflected the desert. The rims rendered as pale "
+            "sand-coloured discs, brighter than the tyres around them, which "
+            "reads as a hole in the wheel rather than a wheel.\n\n"
+            "A real race rim is dark, anodised and largely shadowed inside the "
+            "tyre. Metalness 0.55 keeps some metal character while letting the "
+            "dark base colour carry, and the rougher 0.55 gloss breaks the "
+            "mirror into a sheen."
+        ),
     ),
     "car_body": MaterialSpec(
-        "atlas_car_body", (28, 30, 36), (46, 47, 50), 0.74, 1.6,
+        "atlas_car_body", (28, 30, 36), (58, 60, 64), 0.90, 1.52,
         note=(
             "generic single-seater bodywork — no livery, deliberately.\n\n"
-            "The reflection is deliberately modest. A first pass at (128,130,136) "
-            "and 0.88 glossiness turned a scarlet car into glowing plastic: a "
-            "50% grey mirror over a saturated diffuse re-broadcasts the whole "
-            "sky back at the lens, and the result reads as emissive rather than "
-            "painted. Modern race bodywork is a satin wrap, not a show-car "
-            "clearcoat — a weaker, slightly rougher reflection keeps the "
-            "travelling highlight that says 'car' without the neon."
+            "**A scanned texture is the wrong tool here and none is used.** "
+            "Race bodywork is painted carbon: smooth, and essentially "
+            "featureless at any scale a camera sees. Putting a scanned surface "
+            "on it would add dirt and weave that are not there. What makes a "
+            "car read as a car is the *coat* — a tight, near-mirror specular "
+            "that travels along the panel as the camera moves — and that is a "
+            "reflection property, not a map.\n\n"
+            "So the gloss goes back up to 0.90 with a modest reflection colour "
+            "and an ior of 1.52, which is clearcoat lacquer. The earlier "
+            "(128,130,136) at 0.88 was not wrong because it was glossy; it was "
+            "wrong because a 50% grey reflection re-broadcasts the whole sky. "
+            "Dark reflection, high gloss: a highlight rather than a floodlight.\n\n"
+            "A true two-layer clearcoat (VRayMtl's coat_* parameters) would be "
+            "better still and is NOT set here, because those names have not "
+            "been read off this host and this project does not guess V-Ray "
+            "parameter names."
         ),
     ),
     "line_paint": MaterialSpec(

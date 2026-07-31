@@ -208,7 +208,24 @@ def generate_smoke_script(
     # Per-frame emission gate as a MaxScript BooleanArray. tyFlow reads this
     # via a Custom Properties operator binding; the array is stored on the flow
     # node so it survives a scene save.
-    gate_vals = ", ".join("true" if g else "false" for g in speed_gate_frames)
+    #
+    # **Wrapped, and that is the point of the file.** This script exists to be
+    # read by a person before it executes arbitrary code in their 3ds Max, and
+    # nearly two thousand booleans on one 4,000-character line is not readable
+    # by anyone. Run-length encoding would be shorter still, but it would also
+    # be a second format to trust; wrapping keeps the array literal exactly what
+    # it claims to be and merely makes it fit on a screen.
+    #
+    # 20 per line, with the frame number of the row in a trailing comment, so a
+    # reviewer can find "what is the gate doing around the crash at frame 1388"
+    # without counting commas.
+    gate_lines = []
+    for start in range(0, len(speed_gate_frames), 20):
+        row = speed_gate_frames[start:start + 20]
+        vals = ", ".join("true" if g else "false" for g in row)
+        comma = "," if start + 20 < len(speed_gate_frames) else ""
+        gate_lines.append(f"    {vals}{comma}    -- frames {start}-{start + len(row) - 1}")
+    gate_vals = "\n" + "\n".join(gate_lines) + "\n"
 
     header = _script_header("Tyre Smoke", {
         "flow": flow_name,
@@ -321,19 +338,52 @@ def write_smoke_script(
     sys.path.insert(0, os.path.dirname(__file__))
     import raceanim
 
+    import math
+
     speeds = raceanim.speed_profile(spine)
-    # Map spine-vertex speeds to a per-frame bool list.
-    # Use the mean spine speed over the lap to estimate frame->distance.
     lap_s = max(raceanim.lap_time(spine), 1e-3)
-    fps = end_frame / lap_s if lap_s > 0 else 24.0
     n_frames = int(end_frame) + 1
     n_verts = len(speeds)
 
+    # Frame -> time -> distance -> vertex.
+    #
+    # The previous version went frame -> *vertex index* linearly, and that is
+    # wrong twice over. Spine vertices are 2 m to 266 m apart here, so index is
+    # not proportional to distance; and frames are evenly spaced in *time*, so
+    # they are not proportional to distance either once the car slows for the
+    # corners. The gate was reading the speed of an unrelated part of the
+    # circuit. Same class of error as measuring curvature across adjacent
+    # vertices: treating unevenly-sampled data as if it were even.
+    cumulative = [0.0]
+    for i in range(n_verts):
+        cumulative.append(
+            cumulative[-1] + math.dist(spine[i], spine[(i + 1) % n_verts]))
+
+    def vertex_at(distance: float) -> int:
+        lo, hi = 0, n_verts - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if cumulative[mid + 1] < distance:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    # The crash window. A speed gate alone cannot produce crash smoke: a car
+    # that is spinning is *slow*, and a slow car fails a >200 km/h test —
+    # while being the single biggest smoke source on the circuit. Measured on
+    # the generated script, the gate was false through the entire incident.
+    contact = contact_frame_for(spine, raceanim.CRASH,
+                                fps=int(round(n_frames / lap_s)))
+    crash_from = contact - int(raceanim.CRASH.tell_s * n_frames / lap_s)
+    crash_to = contact + int(raceanim.CRASH.settle_s * n_frames / lap_s)
+
     gate: list[bool] = []
     for f in range(n_frames):
-        frac = f / max(end_frame, 1)
-        v_idx = min(int(frac * n_verts), n_verts - 1)
-        gate.append(speeds[v_idx] >= speed_threshold_ms)
+        seconds = (f / max(end_frame, 1)) * lap_s
+        distance = raceanim.distance_at(spine, seconds)
+        fast = speeds[vertex_at(distance)] >= speed_threshold_ms
+        gate.append(fast or crash_from <= f <= crash_to)
 
     script = generate_smoke_script(
         flow_name, emitter_nodes,
