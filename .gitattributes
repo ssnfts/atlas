@@ -1,0 +1,2 @@
+abs_trial_yas_marina/**/*.vdb filter=lfs diff=lfs merge=lfs -text
+abs_trial_yas_marina/*.blend filter=lfs diff=lfs merge=lfs -text
