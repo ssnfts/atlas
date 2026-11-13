@@ -157,6 +157,53 @@ tests/
 
 ---
 
+## Getting the best result
+
+- **Set the scene to metres before anything else** and keep the site at the
+  world origin. 3ds Max defaults to inches, and wrong units raise no error.
+- **Give an exact location and a local time.** Name the time zone yourself
+  when the site is close to a zone border. A time that does not exist
+  because of a daylight-saving change is rejected, not shifted.
+- **Run `verify_live.py` and `demo_shadow_test.py` after every 3ds Max or
+  V-Ray update.** V-Ray parameter names change between releases and a
+  renamed one fails silently.
+- **Check the sun's direction, not its position.** A sun light without a
+  target points straight down wherever it sits.
+- **Start from the computed camera exposure** and adjust to taste. It is
+  derived from the sun's altitude, so it stays sensible from dawn to noon.
+- **Self-host the weather service for production.** The free endpoint is
+  for non-commercial use and has a daily limit.
+- **To match a photograph, use the photograph's timestamp** and location.
+  Then compare shadow directions in the render and the photo.
+
+## Works well with
+
+**Graphic design.** Sun-accurate stills for architectural boards, shadow
+studies and location diagrams, finished in Photoshop, Affinity or InDesign.
+Rendering one view at several times of day gives a ready-made sequence for
+a layout.
+
+**Product visualization.** A car or a product lit as it would be at a real
+place and hour, which makes it sit correctly on a photographed backplate.
+Pair it with
+[V-Ray material graph builder](https://github.com/ssnfts/V-Ray-material-graph-builder)
+and
+[Motorsport vehicle rig](https://github.com/ssnfts/Motorsport-lap-animation).
+
+**Film.** Previs, plate matching, sun-path studies and virtual-production
+layout. The parts listed as not started in the table above exist as
+separate tools: [CityGen](https://github.com/ssnfts/CityGen) for buildings
+and terrain, and
+[Cinematic camera moves](https://github.com/ssnfts/Cinematic-camera-moves)
+for shots.
+
+**Automation.** [3dsmax-mcp](https://github.com/ssnfts/3dsmax-mcp) exposes
+this pipeline to an AI agent as MCP tools. The
+[3ds Max Python bridge](https://github.com/ssnfts/3dsMax-Python-bridge) on
+its own lets a script render the same scene for a list of dates and times.
+
+---
+
 ## Data sources and attribution
 
 | Source | Licence | Notes |
