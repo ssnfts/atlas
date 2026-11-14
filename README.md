@@ -31,11 +31,12 @@ The lighting pipeline works end to end and is verified against rendered output.
 | Solar position | working — agrees with pvlib's NREL SPA to 0.004° |
 | Timezone / DST | working — rejects nonexistent times rather than shifting them |
 | Scene frame | working — verified against WGS84 geodesics to 0.1% |
-| 3ds Max bridge | working — main-thread marshalled, 306 offline tests |
+| 3ds Max bridge | working — main-thread marshalled, 598 offline tests |
 | V-Ray sun + sky | working — parameters discovered from the live host |
 | Weather → sky | working — turbidity from aerosol optical depth |
-| OSM building massing | not started |
-| Terrain (Copernicus DEM) | not started |
+| OSM building massing | working — verified in the live host, sits on terrain |
+| Terrain (Copernicus DEM) | working — GLO-30, single tile; mosaicking not implemented |
+| Attribution manifest | working — generated from the sources a build used |
 | Photogrammetry (Meshroom) | not started |
 | MCP server | not started |
 
@@ -106,9 +107,27 @@ and reloads any previously loaded bridge, so it is safe to re-run.
 .venv\Scripts\python.exe demo_shadow_test.py
 ```
 
+**4. Build the surrounding city:**
+
+```bash
+.venv\Scripts\python.exe demo_massing.py
+```
+
+Fetches the buildings around the site, extrudes them and pushes them into Max,
+then verifies against the **host** rather than against itself: bounding boxes
+read back out of the scene (so an inch/metre mix-up cannot hide), vertex and
+face counts per building, and the compass — the northmost building in geodetic
+terms must be furthest along +Y in Max.
+
+| | |
+|---|---|
+| Buildings fetched | 93 |
+| Skipped | 0 |
+| Verified in host | 93 — scale, orientation and index integrity |
+
 ## Tests
 
-306 tests, no 3ds Max and no network required:
+598 tests, no 3ds Max and no network required:
 
 ```bash
 .venv\Scripts\python.exe -m pytest tests/ -q
@@ -120,6 +139,20 @@ altitude equals `90 − |lat − decl|`), and an independent algorithm (pvlib's 
 SPA). Agreement between two different algorithms is evidence; checking one
 against itself is not.
 
+The massing geometry is checked the same way, and needed it. Its own invariants
+are conservation laws a self-consistent bug cannot satisfy — triangles summing
+to the polygon's area, divergence-theorem volume equalling footprint × height,
+every edge shared by exactly two faces. On top of that it is cross-validated
+against Shapely, and stress-tested on randomly generated footprints with up to
+five courtyards.
+
+That last layer earned its place immediately: all three bugs found while writing
+the module survived every hand-written case and died to a randomly generated
+one. Each produced a *building* rather than an error — a roof filled in across
+an L-shaped notch, two courtyards whose seams tangled into overlapping
+triangles, and a visibility test that silently reported "nothing in the way" for
+every point whenever the sight triangle came out clockwise.
+
 ---
 
 ## Layout
@@ -130,6 +163,10 @@ server/
   timeframe.py   wall-clock → UTC, with explicit DST failure modes
   frame.py       local ENU scene frame; +X east, +Y true north, +Z up
   weather.py     ERA5 + CAMS → V-Ray sky parameters
+  osm.py         Overpass building footprints, heights and multipolygons
+  massing.py     footprints → watertight extruded meshes
+  terrain.py     Copernicus GLO-30 elevation → terrain mesh
+  attribution.py per-build ATTRIBUTION.txt and height provenance
   scene.py       V-Ray sun, sky, camera and exposure
   maxbridge.py   client for the bridge
 bridge/
@@ -154,6 +191,31 @@ tests/
 - **A `VRaySun` created from script has no target.** It is a targeted light, so
   without one its rotation stays identity and V-Ray points it straight down
   regardless of where the node sits. Verify the *direction*, not the position.
+  **The same applies to cameras**, and it hid for a while: the only camera in
+  the project was the shadow test's straight-down view, which is the one case
+  where identity rotation is also the correct rotation. Aiming a camera at
+  anything else produced an empty frame. Both now assign a real target node and
+  assert the transform's Z axis afterwards.
+- **Mesh face indices are 0-based everywhere except inside Max.** MaxScript is
+  1-based, and the shift happens exactly once, in the `create_mesh` handler at
+  the bridge boundary. Applying it twice — or not at all — does not raise; it
+  shuffles the faces, which reads as a modelling mistake rather than a bug.
+- **Overpass wants `(south, west, north, east)`.** GeoJSON and Leaflet want
+  `(west, south, east, north)`. Transposing them is only detectable when the
+  longitudes exceed ±90 and become impossible latitudes — inside that band the
+  query succeeds and returns nothing, which is indistinguishable from an
+  unmapped site. Use `osm.query_for_site()`, which builds the tuple from the
+  frame so no caller writes the ordering by hand.
+- **A Copernicus DEM read outside its tile returns `0.0`, not an error.** The
+  dataset declares no nodata value and 0.0 is a real sea-level elevation, so
+  loading the wrong tile is indistinguishable from a site on the coast —
+  measured, a desert point read 0.0 instead of 113.7 m. Every read in
+  `terrain.py` is bounds-checked before its value is trusted.
+- **GLO-30 is nominally a *surface* model but measures as bare earth here.**
+  Burj Khalifa's footprint reads 13.5 m against 828 m of building, so OSM
+  massing can sit directly on it without double-counting roofs. That is a
+  measurement, not a guarantee — `terrain.looks_like_surface_model()` re-checks
+  it anywhere new.
 
 ---
 

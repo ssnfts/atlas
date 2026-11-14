@@ -44,6 +44,42 @@ class _FakeNode:
         self._cls = cls
 
 
+class _FakeMesh(_FakeNode):
+    """
+    A mesh node with 1-based vertex and face storage, like MaxScript's.
+
+    The 1-based indexing is modelled rather than smoothed over, because the
+    single most likely defect in the create_mesh handler is applying the
+    0-based-to-1-based shift twice, or not at all.
+    """
+
+    def __init__(self, name: str, handle: int, numverts: int, numfaces: int):
+        super().__init__(name, handle, cls="Editable_Mesh")
+        self.verts: dict[int, _FakePoint3] = {}
+        self.faces: dict[int, _FakePoint3] = {}
+        self.smoothing: dict[int, int] = {}
+        self.numverts = numverts
+        self.numfaces = numfaces
+        self.wirecolor = None
+        self.updated = False
+
+    @property
+    def min(self):
+        return _FakePoint3(
+            min(v.x for v in self.verts.values()),
+            min(v.y for v in self.verts.values()),
+            min(v.z for v in self.verts.values()),
+        )
+
+    @property
+    def max(self):
+        return _FakePoint3(
+            max(v.x for v in self.verts.values()),
+            max(v.y for v in self.verts.values()),
+            max(v.z for v in self.verts.values()),
+        )
+
+
 class _FakeRuntime:
     def __init__(self):
         self.undefined = _FakeSentinel("undefined")
@@ -61,6 +97,13 @@ class _FakeRuntime:
         return "GeometryClass"
 
     def getNodeByName(self, name):
+        # Scan by the node's *current* name, as Max does. A node created under a
+        # generated name and then renamed must be findable by the new name --
+        # keying off the registration name instead makes create_mesh look broken
+        # when only the fake is.
+        for node in self._nodes.values():
+            if getattr(node, "name", None) == name:
+                return node
         return self._nodes.get(name)
 
     def maxVersion(self):
@@ -75,6 +118,42 @@ class _FakeRuntime:
 
     def boom(self):
         raise RuntimeError("deliberate failure")
+
+    # -- mesh construction --
+    def mesh(self, numverts=0, numfaces=0):
+        node = _FakeMesh(
+            f"Mesh{len(self._nodes) + 1:03d}", 200 + len(self._nodes), numverts, numfaces
+        )
+        self._nodes[node.name] = node
+        return node
+
+    def setVert(self, msh, index, point):
+        msh.verts[index] = point
+
+    def setFace(self, msh, index, face):
+        msh.faces[index] = face
+
+    def setFaceSmoothGroup(self, msh, index, group):
+        msh.smoothing[index] = group
+
+    def update(self, msh):
+        msh.updated = True
+
+    def getNumVerts(self, msh):
+        return len(msh.verts)
+
+    def getNumFaces(self, msh):
+        return len(msh.faces)
+
+    def Color(self, r, g, b):
+        return (r, g, b)
+
+    @property
+    def units(self):
+        class _Units:
+            SystemType = "#meters"
+
+        return _Units()
 
     @property
     def objects(self):
@@ -362,6 +441,139 @@ def test_batch_error_records_step_index(fresh_runtime):
         }
     )
     assert out["steps"][1]["step"] == 1
+
+
+# ── Mesh construction ─────────────────────────────────────────────────────────
+#
+# The index-base conversion is the whole risk here. MaxScript is 1-based and the
+# geometry code is 0-based, so the shift happens exactly once, at this boundary.
+# Applying it twice, or not at all, does not raise — it produces a building with
+# its faces shuffled, which looks like a modelling mistake rather than a bug.
+
+def _mesh_params(**overrides) -> dict:
+    params = {
+        "command": "create_mesh",
+        "name": "osm_w1_Tower",
+        "verts": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 0.0, 5.0]],
+        "faces": [[0, 1, 2], [0, 1, 3]],
+    }
+    params.update(overrides)
+    return params
+
+
+def test_create_mesh_converts_indices_to_one_based(fresh_runtime):
+    """0-based in, 1-based out — applied once, here, and nowhere else."""
+    handlers.dispatch("create_mesh", _mesh_params())
+    msh = fresh_runtime.getNodeByName("osm_w1_Tower")
+    assert [(f.x, f.y, f.z) for f in msh.faces.values()] == [(1, 2, 3), (1, 2, 4)]
+
+
+def test_create_mesh_stores_vertices_at_one_based_slots(fresh_runtime):
+    handlers.dispatch("create_mesh", _mesh_params())
+    msh = fresh_runtime.getNodeByName("osm_w1_Tower")
+    assert sorted(msh.verts) == [1, 2, 3, 4]
+    assert (msh.verts[1].x, msh.verts[1].y, msh.verts[1].z) == (0.0, 0.0, 0.0)
+    assert (msh.verts[2].x, msh.verts[2].y, msh.verts[2].z) == (10.0, 0.0, 0.0)
+
+
+def test_create_mesh_reports_counts_read_back_from_the_scene(fresh_runtime):
+    """
+    Counts come from getNumVerts/getNumFaces, not from echoing the request.
+    An echo would agree with itself no matter what actually landed.
+    """
+    result = handlers.dispatch("create_mesh", _mesh_params())
+    assert result["vertex_count"] == 4
+    assert result["face_count"] == 2
+    assert result["requested_verts"] == 4
+    assert result["requested_faces"] == 2
+
+
+def test_create_mesh_returns_the_scene_bounding_box(fresh_runtime):
+    """
+    The bbox is how the caller detects the units trap: send metres into a scene
+    still set to inches and this comes back 39.37x too big, with no other sign.
+    """
+    result = handlers.dispatch("create_mesh", _mesh_params())
+    assert result["bbox_min"] == [0.0, 0.0, 0.0]
+    assert result["bbox_max"] == [10.0, 10.0, 5.0]
+    assert result["units"] == "#meters"
+
+
+def test_create_mesh_sets_the_requested_name(fresh_runtime):
+    result = handlers.dispatch("create_mesh", _mesh_params(name="osm_r99_Block"))
+    assert result["node"] == "osm_r99_Block"
+
+
+def test_create_mesh_faces_are_faceted_not_smoothed(fresh_runtime):
+    """
+    Smoothing group 0. A building is flat planes meeting at hard corners;
+    smoothing averages normals across the roof edge and inflates every block.
+    """
+    handlers.dispatch("create_mesh", _mesh_params())
+    msh = fresh_runtime.getNodeByName("osm_w1_Tower")
+    assert set(msh.smoothing.values()) == {0}
+
+
+def test_create_mesh_calls_update(fresh_runtime):
+    """Without update() the mesh keeps a stale cache and renders as it was."""
+    handlers.dispatch("create_mesh", _mesh_params())
+    assert fresh_runtime.getNodeByName("osm_w1_Tower").updated
+
+
+@pytest.mark.parametrize("bad_index", [4, 7, -1])
+def test_create_mesh_rejects_out_of_range_indices(fresh_runtime, bad_index):
+    """
+    Silently clamping or wrapping here would shuffle faces rather than fail.
+    Catching an index of exactly `len(verts)` also catches a double +1.
+    """
+    with pytest.raises(ValueError, match="outside"):
+        handlers.dispatch("create_mesh", _mesh_params(faces=[[0, 1, bad_index]]))
+
+
+def test_create_mesh_rejects_non_triangles(fresh_runtime):
+    with pytest.raises(ValueError, match="triangles"):
+        handlers.dispatch("create_mesh", _mesh_params(faces=[[0, 1, 2, 3]]))
+
+
+def test_create_mesh_rejects_empty_input(fresh_runtime):
+    with pytest.raises(ValueError, match="verts"):
+        handlers.dispatch("create_mesh", _mesh_params(verts=[]))
+    with pytest.raises(ValueError, match="faces"):
+        handlers.dispatch("create_mesh", _mesh_params(faces=[]))
+
+
+def test_create_mesh_is_registered_for_batch(fresh_runtime):
+    """
+    Buildings are pushed through `batch`, so the command has to be dispatchable
+    by name — a handler missing from the table fails only at the live host.
+    """
+    assert "create_mesh" in handlers.HANDLERS
+    out = handlers.run_job(
+        {
+            "command": "batch",
+            "stop_on_error": False,
+            "steps": [_mesh_params(name="a"), _mesh_params(name="b")],
+        }
+    )
+    assert [s["ok"] for s in out["steps"]] == [True, True]
+    assert all(fresh_runtime.getNodeByName(n) for n in ("a", "b"))
+
+
+def test_batch_of_meshes_survives_one_bad_building(fresh_runtime):
+    """One badly-mapped footprint must cost that building, not the whole chunk."""
+    out = handlers.run_job(
+        {
+            "command": "batch",
+            "stop_on_error": False,
+            "steps": [
+                _mesh_params(name="good_a"),
+                _mesh_params(name="bad", faces=[[0, 1, 99]]),
+                _mesh_params(name="good_b"),
+            ],
+        }
+    )
+    assert [s["ok"] for s in out["steps"]] == [True, False, True]
+    assert all(fresh_runtime.getNodeByName(n) for n in ("good_a", "good_b"))
 
 
 # ── Job object ────────────────────────────────────────────────────────────────

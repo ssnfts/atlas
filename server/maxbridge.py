@@ -232,6 +232,73 @@ class MaxBridge:
             timeout=timeout,
         )
 
+    def create_mesh(
+        self,
+        name: str,
+        verts: list[tuple[float, float, float]],
+        faces: list[tuple[int, int, int]],
+        *,
+        wirecolor: tuple[float, float, float] | None = None,
+        timeout: float = 300.0,
+    ) -> dict:
+        """
+        Build an Editable_Mesh from vertices and 0-based triangle indices.
+
+        Atomic host-side: assembling a mesh through generic ``call`` would cost
+        one main-thread slot per vertex, and a city block is thousands of them.
+
+        Indices stay 0-based on this side. The +1 for MaxScript happens once,
+        inside the handler.
+
+        The reply carries the vertex count and bounding box read back out of the
+        scene, so a caller can check that what landed is what was sent — see
+        :meth:`create_meshes`, which does exactly that.
+        """
+        return self._send(
+            {
+                "command": "create_mesh",
+                "name": name,
+                "verts": [[float(x), float(y), float(z)] for x, y, z in verts],
+                "faces": [[int(a), int(b), int(c)] for a, b, c in faces],
+                "wirecolor": list(wirecolor) if wirecolor else None,
+            },
+            timeout=timeout,
+        )
+
+    def create_meshes(
+        self,
+        meshes: list[tuple[str, list, list]],
+        *,
+        chunk: int = 40,
+        stop_on_error: bool = False,
+        timeout: float = 600.0,
+    ) -> list[dict]:
+        """
+        Create many meshes, batched into one main-thread slot per chunk.
+
+        ``stop_on_error`` defaults to False here, unlike :meth:`batch`: one
+        badly-mapped OSM footprint should cost that building, not the other
+        thirty-nine in the chunk. Failures come back as entries with ``ok``
+        False and are the caller's to count.
+
+        Chunking exists because a single request holds the main thread for its
+        whole duration — a thousand buildings in one batch freezes Max's UI for
+        long enough to look like a hang.
+        """
+        results: list[dict] = []
+        for start in range(0, len(meshes), chunk):
+            steps = [
+                {
+                    "command": "create_mesh",
+                    "name": name,
+                    "verts": [[float(x), float(y), float(z)] for x, y, z in verts],
+                    "faces": [[int(a), int(b), int(c)] for a, b, c in faces],
+                }
+                for name, verts, faces in meshes[start:start + chunk]
+            ]
+            results += self.batch(steps, stop_on_error=stop_on_error, timeout=timeout)
+        return results
+
     def list_renderers(self, timeout: float = 60.0) -> dict:
         """Installed renderer classes, and which one each slot currently holds."""
         return self._send({"command": "list_renderers"}, timeout=timeout)
